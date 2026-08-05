@@ -1,2 +1,3 @@
 -- Custom SQL migration file, put your code below! --
-CREATE EXTENSION IF NOT EXISTS pg_search;
+-- CREATE EXTENSION IF NOT EXISTS pg_search;
+-- disabled for Supabase
