@@ -1,3 +1,4 @@
+import { CUSTOM_DOCUMENT_FILE_TYPE, CUSTOM_FOLDER_FILE_TYPE } from '@lobechat/const';
 import type { FileUploader, QueryFileListParams } from '@lobechat/types';
 import { FilesTabs, SortType } from '@lobechat/types';
 import { and, eq, sql } from 'drizzle-orm';
@@ -6,6 +7,7 @@ import { DocumentModel } from '../../models/document';
 import { FileModel } from '../../models/file';
 import { DOCUMENT_FOLDER_TYPE, documents, files, knowledgeBaseFiles, users } from '../../schemas';
 import type { LobeChatDatabase } from '../../type';
+import { buildDocumentCategoryFilter, buildFileCategoryFilter } from '../../utils/fileTypeCategory';
 import { buildWorkspaceWhere } from '../../utils/workspace';
 
 export interface KnowledgeItem {
@@ -40,6 +42,13 @@ export interface KnowledgeItem {
    */
   visibility?: 'private' | 'public' | null;
 }
+
+/**
+ * Kind of row a recent query is after:
+ * - `file` — uploaded files, excluding the file rows that back a derived page
+ * - `page` — derived pages / notes, excluding folders
+ */
+export type RecentItemKind = 'file' | 'page';
 
 interface KnowledgeQueryParams extends QueryFileListParams {
   /** Restrict the result set to rows created by a specific workspace member. */
@@ -226,8 +235,21 @@ export class KnowledgeRepo {
   /**
    * Query recent items (files and documents)
    * Returns the most recently updated items
+   *
+   * `kind` narrows the result to uploaded files or derived pages. The narrowing
+   * has to happen inside SQL: filtering the combined list afterwards lets
+   * `LIMIT` truncate away every row of the wanted kind — a burst of uploads
+   * left the resource home with an empty "recent pages" section.
    */
-  async queryRecent(limit: number = 12): Promise<KnowledgeItem[]> {
+  async queryRecent(limit: number = 12, kind?: RecentItemKind): Promise<KnowledgeItem[]> {
+    // Derived pages live in the documents table; their backing file row is not
+    // a file the user uploaded, so it never belongs to the file list.
+    const fileKindCondition =
+      kind === 'file' ? sql` AND f.file_type != ${CUSTOM_DOCUMENT_FILE_TYPE}` : sql``;
+    // Folders are containers, not pages.
+    const pageKindCondition =
+      kind === 'page' ? sql` AND file_type != ${CUSTOM_FOLDER_FILE_TYPE}` : sql``;
+
     const fileQuery = sql`
       SELECT
         COALESCE(d.id, f.id) as id,
@@ -261,7 +283,7 @@ export class KnowledgeRepo {
         AND NOT EXISTS (
           SELECT 1 FROM ${knowledgeBaseFiles}
           WHERE ${knowledgeBaseFiles.fileId} = f.id
-        )
+        )${fileKindCondition}
     `;
 
     const documentQuery = sql`
@@ -301,14 +323,23 @@ export class KnowledgeRepo {
       ) documents
       WHERE ${this.documentOwnershipSql('documents')}
         AND source_type != ${'file'}
-        AND knowledge_base_id IS NULL
+        AND knowledge_base_id IS NULL${pageKindCondition}
     `;
 
-    const combinedQuery = sql`
-      SELECT * FROM (
+    const sourceQuery =
+      kind === 'file'
+        ? sql`(${fileQuery})`
+        : kind === 'page'
+          ? sql`(${documentQuery})`
+          : sql`
         (${fileQuery})
         UNION ALL
         (${documentQuery})
+      `;
+
+    const combinedQuery = sql`
+      SELECT * FROM (
+        ${sourceQuery}
       ) as combined
       ORDER BY updated_at DESC
       LIMIT ${limit}
@@ -484,13 +515,11 @@ export class KnowledgeRepo {
 
     // Category filter
     if (category && category !== FilesTabs.All) {
-      const fileTypePrefix = this.getFileTypePrefix(category as FilesTabs);
-      if (Array.isArray(fileTypePrefix)) {
-        // For multiple file types (e.g., Documents includes 'application' and 'custom')
-        const orConditions = fileTypePrefix.map((prefix) => sql`f.file_type ILIKE ${`${prefix}%`}`);
-        whereConditions.push(sql`(${sql.join(orConditions, sql` OR `)})`);
-      } else {
-        whereConditions.push(sql`f.file_type ILIKE ${`${fileTypePrefix}%`}`);
+      const categoryFilter = buildFileCategoryFilter(sql.raw('f.file_type'), category as FilesTabs);
+      if (categoryFilter === 'none') {
+        whereConditions.push(sql`false`);
+      } else if (categoryFilter !== 'all') {
+        whereConditions.push(categoryFilter);
       }
     }
 
@@ -519,14 +548,14 @@ export class KnowledgeRepo {
 
       // Category filter
       if (category && category !== FilesTabs.All && category !== FilesTabs.Home) {
-        const fileTypePrefix = this.getFileTypePrefix(category as FilesTabs);
-        if (Array.isArray(fileTypePrefix)) {
-          const orConditions = fileTypePrefix.map(
-            (prefix) => sql`f.file_type ILIKE ${`${prefix}%`}`,
-          );
-          kbWhereConditions.push(sql`(${sql.join(orConditions, sql` OR `)})`);
-        } else {
-          kbWhereConditions.push(sql`f.file_type ILIKE ${`${fileTypePrefix}%`}`);
+        const categoryFilter = buildFileCategoryFilter(
+          sql.raw('f.file_type'),
+          category as FilesTabs,
+        );
+        if (categoryFilter === 'none') {
+          kbWhereConditions.push(sql`false`);
+        } else if (categoryFilter !== 'all') {
+          kbWhereConditions.push(categoryFilter);
         }
       }
 
@@ -658,23 +687,13 @@ export class KnowledgeRepo {
       );
     }
 
-    // Category filter - match documents by fileType prefix
+    // Category filter — document rows only surface under All and Pages; every
+    // file-oriented category (Documents included) excludes the table entirely.
     if (category && category !== FilesTabs.All) {
-      const fileTypePrefix = this.getFileTypePrefix(category as FilesTabs);
-      if (Array.isArray(fileTypePrefix)) {
-        // For multiple file types (e.g., Documents includes 'application' and 'custom')
-        const orConditions = fileTypePrefix.map(
-          (prefix) => sql`${documents.fileType} ILIKE ${`${prefix}%`}`,
-        );
-        whereConditions.push(sql`(${sql.join(orConditions, sql` OR `)})`);
-
-        // Exclude custom/document from Documents category
-        if (category === FilesTabs.Documents) {
-          whereConditions.push(sql`${documents.fileType} != ${'custom/document'}`);
-        }
-      } else if (fileTypePrefix) {
-        whereConditions.push(sql`${documents.fileType} ILIKE ${`${fileTypePrefix}%`}`);
-      } else {
+      const categoryFilter = buildDocumentCategoryFilter(documents.fileType, category as FilesTabs);
+      if (categoryFilter !== 'all' && categoryFilter !== 'none') {
+        whereConditions.push(categoryFilter);
+      } else if (categoryFilter === 'none') {
         // Exclude documents from other categories (Images, Videos, Audios, Websites)
         return sql`
           SELECT
@@ -735,25 +754,15 @@ export class KnowledgeRepo {
         kbWhereConditions.push(sql`(d.visibility = 'public' OR d.visibility IS NULL)`);
       }
 
-      // Category filter
+      // Category filter (document rows only surface under All / Pages — see above)
       if (category && category !== FilesTabs.All) {
-        const fileTypePrefix = this.getFileTypePrefix(category as FilesTabs);
-        if (Array.isArray(fileTypePrefix)) {
-          const orConditions = fileTypePrefix.map(
-            (prefix) => sql`d.file_type ILIKE ${`${prefix}%`}`,
-          );
-          kbWhereConditions.push(sql`(${sql.join(orConditions, sql` OR `)})`);
-
-          // Exclude custom/document and source_type='file' from Documents category
-          if (category === FilesTabs.Documents) {
-            kbWhereConditions.push(
-              sql`d.file_type != ${'custom/document'}`,
-              sql`d.source_type != ${'file'}`,
-            );
-          }
-        } else if (fileTypePrefix) {
-          kbWhereConditions.push(sql`d.file_type ILIKE ${`${fileTypePrefix}%`}`);
-        } else {
+        const categoryFilter = buildDocumentCategoryFilter(
+          sql.raw('d.file_type'),
+          category as FilesTabs,
+        );
+        if (categoryFilter !== 'all' && categoryFilter !== 'none') {
+          kbWhereConditions.push(categoryFilter);
+        } else if (categoryFilter === 'none') {
           // Exclude documents from other categories (Images, Videos, Audios, Websites).
           // Keep the NULL placeholder column set aligned with the other UNION
           // branches so PostgreSQL doesn't complain about mismatched arity.
@@ -870,28 +879,5 @@ export class KnowledgeRepo {
     }
 
     return sql.raw('created_at DESC');
-  }
-
-  private getFileTypePrefix(category: FilesTabs): string | string[] {
-    switch (category) {
-      case FilesTabs.Audios: {
-        return 'audio';
-      }
-      case FilesTabs.Documents: {
-        return ['application', 'custom'];
-      }
-      case FilesTabs.Images: {
-        return 'image';
-      }
-      case FilesTabs.Videos: {
-        return 'video';
-      }
-      case FilesTabs.Websites: {
-        return 'text/html';
-      }
-      default: {
-        return '';
-      }
-    }
   }
 }

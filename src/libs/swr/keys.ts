@@ -192,18 +192,22 @@ export const agentLabelKeys = {
 };
 
 // ---- agent builder (opening-suggestion chips) ---------------------------
-// Kept off `CACHE_TIERS` on purpose — these are ephemeral LLM-generated chips.
-// `contextSummary` is intentionally NOT part of the key so config autosaves for
-// the same target don't refetch; `nonce` bumps on manual refresh.
+// Persisted to the localStorage tier (see `CACHE_TIERS.local`) so revisits skip
+// the LLM generation instead of paying a skeleton + a generateJSON call every
+// page load. `contextSummary` is intentionally NOT part of the key so config
+// autosaves for the same target don't refetch; manual refresh revalidates the
+// same key in place (see `useBuilderSuggestions`). `locale` IS part of the key:
+// chips are generated in the UI language, so a persisted entry must not be
+// served after a language switch.
 export const agentBuilderKeys = {
   suggestions: def(
     'agentBuilder:suggestions',
-    (mode: string, builderAgentId: string, targetId: string | undefined, nonce: number) => [
+    (mode: string, builderAgentId: string, targetId: string | undefined, locale?: string) => [
       'agentBuilder:suggestions',
       mode,
       builderAgentId,
       targetId,
-      nonce,
+      locale ?? null,
     ],
   ),
 };
@@ -249,10 +253,11 @@ export const recentKeys = {
     scope,
   ]),
   /** Home chat-only list; filtering happens before the server-side limit. */
-  topicList: def('recent:topicList', (limit: number, scope: string) => [
+  topicList: def('recent:topicList', (limit: number, scope: string, view: 'mine' | 'team') => [
     'recent:topicList',
     limit,
     scope,
+    view,
   ]),
 };
 
@@ -309,7 +314,22 @@ export const workKeys = {
 
 // ---- brief --------------------------------------------------------------
 export const briefKeys = {
-  list: def('brief:list', (isLogin: boolean) => ['brief:list', isLogin]),
+  /**
+   * Unresolved brief feed, keyed by login + identity scope. Briefs are per-user
+   * AND per-workspace rows, so an entry fetched in one scope must never be
+   * served in another — its ids are unreachable there.
+   */
+  list: def('brief:list', (isLogin: boolean, scope: string) => ['brief:list', isLogin, scope]),
+  /**
+   * Day-scoped news digest (`insight` + `result`, resolved included), keyed by
+   * the viewer's local day (`YYYY-MM-DD`) on top of the identity scope.
+   */
+  news: def('brief:news', (isLogin: boolean, scope: string, day: string) => [
+    'brief:news',
+    isLogin,
+    scope,
+    day,
+  ]),
 };
 
 // ---- home inbox ---------------------------------------------------------
@@ -334,6 +354,11 @@ export const aiModelKeys = {
     offset,
   ]),
   list: def('aiModel:list', (provider: string | undefined) => ['aiModel:list', provider]),
+  reasoningConfig: def('aiModel:reasoningConfig', (provider: string, model: string) => [
+    'aiModel:reasoningConfig',
+    provider,
+    model,
+  ]),
 };
 
 // ---- image generation ---------------------------------------------------

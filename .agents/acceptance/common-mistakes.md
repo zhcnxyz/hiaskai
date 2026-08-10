@@ -10,6 +10,21 @@ in feature specifications or historical field notes, not in this living checklis
 
 ## Evidence and publication
 
+### L-E5 — Treating historical branch rendering as proof that conversation can continue
+
+**Wrong approach:** render a recovered historical `taskCallback` card beside the
+active tool continuation, then call the message-loss regression verified without
+sending another user message.
+
+**Why it fails:** read-path recovery proves only that existing rows are visible.
+The next user turn exercises a separate write/parent-selection path and can still
+attach to the wrong branch, disappear after reconciliation, or vanish after reload.
+
+**Correct approach:** for every conversation-branch regression, continue from the
+fixture through the real composer. Assert the new user row in the database, its
+parent on the active spine, its rendered presence before and after a cold reload,
+and the resulting assistant continuation when the environment supports it.
+
 ### L-E1 — Publishing a replacement as a second Acceptance row
 
 **Wrong approach:** assign a replacement check a new id without `supersedes`, or
@@ -160,6 +175,25 @@ disclosure is not expressible in that field.
 **Correct approach:** set `"verifier": "llm"` and carry the multimodal disclosure in
 the plan item's `method` prose alongside `"requiredEvidence": ["screenshot"]`.
 
+### L-E13 — Publishing uncommitted work onto the branch's unrelated PR
+
+**Wrong approach:** verify working-tree changes that have no PR of their own, then
+ingest without stating that, assuming the round carries no PR because `result.json`
+omits `pullRequest` (or sets it to `null`).
+
+**Why it fails:** the ingest resolves the PR from `branch` whenever the field is
+absent OR null, so a long-lived branch that already owns a PR stamps every round
+with it. The page then presents an unrelated PR as the provenance of this
+verification, and deleting the run and re-ingesting reproduces the same stamp.
+Two rounds later nobody can tell which delivery the evidence belongs to.
+
+**Correct approach:** before publishing a round for uncommitted work, decide the
+provenance explicitly — commit and open the real PR first, or state in `report.md`
+that this round has no PR and that any PR shown belongs to other work on the same
+branch. Also re-read `branch` / `commit` at publish time rather than trusting the
+scaffold: a session that spans a branch switch fills them from whatever is checked
+out when `report-init.sh` ran.
+
 ## Product and interaction contracts
 
 ### L-D1 — Rebuilding a canonical surface from visual impression
@@ -230,7 +264,70 @@ and intermediate flex sizing can hide the intended inner scrollbars.
 independent scroll regions to navigation and detail, and verify scroll ownership with
 DOM measurements as well as visual evidence.
 
+### L-D7 — Treating a route-driven Segmented's selected segment as a clickable affordance
+
+**Wrong approach:** put a `Segmented` in a page header, have `onChange` write the URL, and
+then rely on clicking the already-selected segment to reach that section's own index route —
+typically to get back to a list from a `:param` detail route nested under it. Removing the
+breadcrumb's section link on the strength of that assumption is the usual companion move.
+
+**Why it fails:** `Segmented` fires only on a _change_, so the active segment dispatches
+nothing. On the detail route the segment is still highlighted, so it reads as the obvious way
+back while being completely inert — the click is silent, the URL does not move, and nothing
+errors. A grouped route family makes this easy to miss, because the switcher works perfectly
+on every sibling index route and fails only one level deeper.
+
+**Correct approach:** treat a route-driven Segmented as a switcher between sibling sections,
+never as navigation _within_ the selected section. Whenever a section owns deeper routes,
+keep a separate ancestor affordance for them — the breadcrumb's section link is the natural
+one. Where that link would otherwise duplicate the segment's own label, render it only on the
+deeper routes and let the segment name the section on the index route. Verify the deepest
+route of every section, not just the index: an index-only pass cannot see this failure.
+
 ## Environment safety
+
+### L-S0 — Concluding a dependency moved from the root manifest alone
+
+**Wrong approach:** refresh a shared dependency by running `pnpm install --filter .`
+at the repo root — or by bumping only the root range and running a full install —
+then read the new version out of `package.json` and treat a type-check failure in
+untouched files as pre-existing.
+
+**Why it fails:** the filter installs only the root workspace, and even an unfiltered
+install leaves `packages/*` on their old resolution when they declare a loose range
+(`"@lobehub/ui": "^5"` is satisfied by both the old and the new version, so nothing
+forces them to move). Two identities of the same package then coexist in the graph,
+and the errors surface far from the change — a duplicated `next` shows up as
+`NextRequest is not assignable to NextRequest` in backend route shells, and a
+duplicated UI package kills routes at the ErrorBoundary with a missing React context,
+or gives a component library two copies of a shared z-index/portal manager. Neither
+names the real cause.
+
+**Correct approach:** run a full `pnpm install` (no filter) after any dependency
+range change, then `pnpm dedupe` when the root and the workspace packages resolve
+different versions of a shared peer. State the version only from resolved copies —
+count the versions under `node_modules/<pkg>` and every `packages/*/node_modules/<pkg>`
+and require one distinct value — never from the root manifest. Remember `apps/desktop`
+and `apps/cli` are standalone installs that a root install never covers.
+
+### L-S0b — Reading a first-boot renderer crash as a defect of the change under test
+
+**Wrong approach:** treat the Electron dev instance's first renderer boot as
+representative, and diagnose a `ReferenceError: Cannot access '<X>' before
+initialization` thrown from the desktop router config as a bug in the branch.
+
+**Why it fails:** the desktop Vite renderer can serve a partially initialized
+module graph on the very first boot after a cold start (dependency optimization
+runs concurrently with the first evaluation). The app stays on the HTML loading
+shell with `rootChildren: 0` while the stores are already exposed, which reads
+exactly like a broken route tree. A single `location.reload()` boots it cleanly
+with no code change.
+
+**Correct approach:** on a first-boot renderer error, reload once and re-probe
+before drawing any conclusion. Only if the error survives a reload does it belong
+to the code. Never attribute it to the change under test without that A/B — and
+note that `electron-dev.sh start` reports "Ready" even when the renderer never
+became interactive, so its own readiness line is not the gate.
 
 ### L-S1 — Publishing to an assumed server target
 
@@ -314,6 +411,99 @@ search params: express a param write as a facade navigation rather than
 it in the route layout instead, and cover it with a test that asserts which router
 received the write — a test that only asserts a write happened passes on the
 broken topology too.
+
+### L-S7 — Verifying a dependency-level fix through a dev server that predates the install
+
+**Wrong approach:** confirm the fixed version exists in `node_modules`, then capture
+behavioral evidence through an already-running Vite dev server.
+
+**Why it fails:** Vite pins its optimized dependency bundle at server boot. A server
+started before (or during) the `pnpm install` that brought the fix serves the old
+dependency code for its entire lifetime — the browser provably executes code that no
+longer exists on disk, and the evidence contradicts the source. An in-process restart
+via touching the Vite config can wedge the optimizer (new dep URLs 504); only a real
+process restart is trustworthy.
+
+**Correct approach:** before capturing evidence for a dependency-level change, prove
+the served bundle carries it — fetch the relevant `/node_modules/.vite/deps/*` chunk
+from the dev server and grep for a marker of the fix — or restart the dev server
+process outright and re-verify.
+
+**Same failure, second shape — a dev server that was already running when the run
+started.** A leftover server can be listening on a port that no longer matches what
+`test-env.sh` resolves, serving a dep graph optimized against a different config. The
+SPA then dies at the ErrorBoundary with `TypeError: Failed to fetch dynamically
+imported module: …/_layout/index.tsx`, which reads exactly like a broken route tree in
+the branch under test — while every module in that graph still returns 200 to `curl`,
+because the served copy and the requested copy disagree, not the source. Before
+attributing any module-load failure to the change under test, compare the running
+server's port with `test-env.sh`'s resolved `PORT`; on a mismatch, `stop-dev` and
+restart before diagnosing anything. The restarted server is then yours to stop at
+teardown even though you did not start the original.
+
+---
+
+## Cross-agent dispatch envelopes are not visible user turns
+
+**Wrong approach**: treat every persisted `role: user` row as a user-authored
+message when building the visible conversation list.
+
+**Why it's wrong**: `callAgent` persists a synthetic user envelope beneath the
+caller assistant so the target Agent has an isolated execution context. When
+that envelope is rendered, the original prompt appears twice even though the
+target Agent produced only one reply.
+
+**What it breaks**: users see a duplicate prompt bubble and cannot tell whether
+the delegation ran once or twice; acceptance screenshots become misleading.
+
+**Correct approach**: stamp synthetic envelopes with explicit dispatch metadata
+when they are persisted, keep them in the context tree, and let the presentation
+layer hide only rows declared `visibility: internal`. Continue traversal through
+the envelope so the target assistant reply remains independently visible.
+Never infer authorship from agent-id differences or a parent tool call: a real
+cross-Agent user follow-up can have the same tree shape.
+
+## A terminal Claude Code reply is not evidence of live streaming
+
+**Wrong approach**: ask a device-executed Claude Code agent for a one-token fixed
+marker, record until the process exits, and treat the eventual assistant text or
+a refreshed screenshot as proof that the reply streamed into the open Topic.
+
+**Why it's wrong**: `lh hetero exec` can run Claude Code without
+`--include-partial-messages`. In that mode the adapter receives only the final
+assistant snapshot, so the UI may show an empty target-Agent shell for the whole
+run and acquire the text only during terminal reconciliation. A short fixed
+marker also has no observable intermediate state even when partial framing works.
+
+**What it breaks**: the acceptance proves persistence and refresh recovery but
+does not prove the user sees the answer arrive live; a GIF of an empty shell is
+mistaken for streaming evidence.
+
+**Correct approach**: enable Claude Code partial messages on the device/sandbox
+CLI spawn path. Verify with a multi-part response and timestamped DOM/store
+samples before any reload, then attach a GIF whose frames visibly progress and
+whose final frame contains the complete answer. Check persistence separately by
+refreshing only after the live-stream assertion has passed.
+
+## A text-only direct mention does not prove tool-call ownership
+
+**Wrong approach**: verify a leading single-Agent mention only with a plain-text
+response, then conclude that the direct-routing message tree is correct for all
+target-Agent runs.
+
+**Why it's wrong**: tool-capable runs add assistant tool-call chunks and
+tool-result messages. Those nodes can accidentally inherit the owner Agent,
+create a synthetic target-user envelope, or resume the owner after the tool
+result even when the initial text response looked correct.
+
+**What it breaks**: the simple happy path passes while real coding Agents either
+lose their tool output, render it under the wrong Agent, or invoke Lobe AI for
+the final answer.
+
+**Correct approach**: exercise a deterministic real tool call through the same
+gateway/device route, then assert the complete persisted tree: original owner
+user, target assistant/tool call, tool result, and target final response. Also
+assert there is no owner assistant, `callAgent`, or synthetic target-user row.
 
 ## Historical source
 

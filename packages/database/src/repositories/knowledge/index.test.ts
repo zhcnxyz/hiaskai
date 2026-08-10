@@ -126,24 +126,24 @@ describe('KnowledgeRepo', () => {
       expect(uploadedPdf).toBeUndefined();
     });
 
-    it('should include documents with sourceType="api" in Documents category', async () => {
+    it('should exclude document-table rows from Documents category (files only)', async () => {
       const results = await knowledgeRepo.query({ category: FilesTabs.Documents });
 
-      // Should include API PDF (application/pdf with sourceType='api')
-      const apiPdf = results.find((item) => item.name === 'api-pdf.pdf');
-      expect(apiPdf).toBeDefined();
-      expect(apiPdf?.sourceType).toBe('document');
-      expect(apiPdf?.fileType).toBe('application/pdf');
+      // Documents means uploaded document FILES; derived document rows stay out
+      expect(results.find((item) => item.name === 'api-pdf.pdf')).toBeUndefined();
+      expect(results.find((item) => item.name === 'web-doc.txt')).toBeUndefined();
+      expect(results.every((item) => item.sourceType === 'file')).toBe(true);
     });
 
-    it('should include documents with sourceType="web" in Documents category', async () => {
-      const results = await knowledgeRepo.query({ category: FilesTabs.Documents });
+    it('should surface custom/* document rows under the Pages category', async () => {
+      const results = await knowledgeRepo.query({ category: FilesTabs.Pages });
 
-      // Should include web document (custom/other with sourceType='web')
+      // custom/other derived doc belongs to Pages
       const webDoc = results.find((item) => item.name === 'web-doc.txt');
       expect(webDoc).toBeDefined();
       expect(webDoc?.sourceType).toBe('document');
-      expect(webDoc?.fileType).toBe('custom/other');
+      // uploaded files never surface under Pages
+      expect(results.every((item) => item.sourceType === 'document')).toBe(true);
     });
 
     it('should include files from files table in Documents category', async () => {
@@ -180,18 +180,14 @@ describe('KnowledgeRepo', () => {
       expect(regularFile).toBeDefined();
     });
 
-    it('should apply both filters together in Documents category', async () => {
+    it('should keep the Documents category free of document-table rows', async () => {
       const results = await knowledgeRepo.query({ category: FilesTabs.Documents });
 
-      // Count documents with sourceType='document'
       const documentTypeItems = results.filter((item) => item.sourceType === 'document');
+      expect(documentTypeItems).toHaveLength(0);
 
-      // Should have exactly 2 documents (api-pdf and web-doc)
-      // Excluded: uploaded-pdf (sourceType='file') and editor-doc (fileType='custom/document')
-      expect(documentTypeItems).toHaveLength(2);
-
-      const names = documentTypeItems.map((item) => item.name).sort();
-      expect(names).toEqual(['api-pdf.pdf', 'web-doc.txt']);
+      // the uploaded pdf file from the files table is still there
+      expect(results.find((item) => item.name === 'regular-pdf-file.pdf')).toBeDefined();
     });
   });
 
@@ -723,6 +719,64 @@ describe('KnowledgeRepo', () => {
 
       const otherUserItem = results.find((item) => item.name === 'other-recent.pdf');
       expect(otherUserItem).toBeUndefined();
+    });
+
+    it('should still return pages when newer files would fill the limit', async () => {
+      // The page kind has to be filtered in SQL: filtering a truncated
+      // recent-everything list dropped every page as soon as the newest rows
+      // were all files, emptying the resource home "recent pages" section.
+      await serverDB.insert(files).values(
+        Array.from({ length: 5 }, (_, index) => ({
+          id: `newer-file-${index}`,
+          fileType: 'application/pdf',
+          name: `newer-${index}.pdf`,
+          size: 1024,
+          url: `newer-url-${index}`,
+          userId,
+          updatedAt: new Date('2024-02-01T10:00:00Z'),
+        })),
+      );
+
+      const results = await knowledgeRepo.queryRecent(3, 'page');
+
+      expect(results.map((item) => item.name)).toEqual(['recent-doc.txt']);
+    });
+
+    it('should exclude folders from the page kind', async () => {
+      await serverDB.insert(documents).values({
+        id: 'recent-folder',
+        fileType: 'custom/folder',
+        filename: 'recent folder',
+        source: 'api-source',
+        sourceType: 'api',
+        title: 'recent folder',
+        totalCharCount: 0,
+        totalLineCount: 0,
+        updatedAt: new Date('2024-01-04T10:00:00Z'),
+        userId,
+      });
+
+      const results = await knowledgeRepo.queryRecent(10, 'page');
+
+      expect(results.some((item) => item.id === 'recent-folder')).toBe(false);
+      expect(results.map((item) => item.name)).toEqual(['recent-doc.txt']);
+    });
+
+    it('should exclude derived page rows from the file kind', async () => {
+      await serverDB.insert(files).values({
+        id: 'derived-page-file',
+        fileType: 'custom/document',
+        name: 'a page',
+        size: 0,
+        url: 'url-page',
+        userId,
+        updatedAt: new Date('2024-01-04T10:00:00Z'),
+      });
+
+      const results = await knowledgeRepo.queryRecent(10, 'file');
+
+      expect(results.some((item) => item.id === 'derived-page-file')).toBe(false);
+      expect(results.map((item) => item.name)).toEqual(['recent-1.pdf', 'recent-2.pdf']);
     });
   });
 
