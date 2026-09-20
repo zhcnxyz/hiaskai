@@ -1,6 +1,8 @@
 import { MemorySourceType } from '@lobechat/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createStepRunner } from '@/server/workflows/testing/stepContext';
+
 import { processUserTopicsHandler } from '../processUserTopics';
 
 const mocks = vi.hoisted(() => ({
@@ -40,11 +42,13 @@ vi.mock('@/server/services/memory/userMemory/extract', () => ({
 }));
 
 vi.mock('@/database/models/asyncTask', () => ({
-  AsyncTaskModel: vi.fn(() => ({
-    appendUserMemoryWorkflowRunIds: mocks.appendUserMemoryWorkflowRunIds,
-    isHourlyMemoryExtractionCancellationRequested:
-      mocks.isHourlyMemoryExtractionCancellationRequested,
-  })),
+  AsyncTaskModel: vi.fn(function () {
+    return {
+      appendUserMemoryWorkflowRunIds: mocks.appendUserMemoryWorkflowRunIds,
+      isHourlyMemoryExtractionCancellationRequested:
+        mocks.isHourlyMemoryExtractionCancellationRequested,
+    };
+  }),
 }));
 
 vi.mock('@/database/server', () => ({
@@ -64,7 +68,7 @@ vi.mock('../runGuard', () => ({
 
 const createContext = (requestPayload: Record<string, unknown>) => ({
   requestPayload,
-  run: vi.fn((_name: string, callback: () => unknown) => callback()),
+  run: createStepRunner(),
 });
 
 describe('processUserTopicsHandler hourly task behavior', () => {

@@ -23,7 +23,7 @@ const createService = (overrides: Partial<ILocalSystemService> = {}): ILocalSyst
 });
 
 describe('LocalSystemExecutionRuntime.editFile', () => {
-  it('surfaces the underlying error message instead of UNKNOWN_EXEC_ERROR', async () => {
+  it('reports a failed edit as a failure, with the underlying message intact', async () => {
     const service = createService({
       editLocalFile: vi.fn().mockResolvedValue({
         error: 'The specified old_string was not found in the file',
@@ -40,9 +40,43 @@ describe('LocalSystemExecutionRuntime.editFile', () => {
       search: 'foo',
     });
 
-    expect(output.success).toBe(true);
+    // `success` drives the tool_end event, `usage.tools.byTool[].errors` and
+    // the trace inspector's ✓/✗ — an edit that changed nothing must not land
+    // in any of them as a success.
+    expect(output.success).toBe(false);
+    // …while `error` reaches `pluginError`, which the EditLocalFile renderer
+    // branches on to draw its "Edit Failed" alert.
+    expect((output.error as { message: string }).message).toBe(
+      'The specified old_string was not found in the file',
+    );
+    // The model reads `content`; it must still carry the real reason.
     expect(output.content).toBe('The specified old_string was not found in the file');
     expect(output.content).not.toContain('UNKNOWN_EXEC_ERROR');
+    expect((output.state as { replacements: number }).replacements).toBe(0);
+  });
+
+  // `executeToolWithRetry` escalates on `error.kind === 'retry'`. These
+  // failures were never retried while they claimed success; flipping the flag
+  // must not quietly enrol them in the retry loop.
+  it('does not mark a failed edit as retryable', async () => {
+    const service = createService({
+      editLocalFile: vi.fn().mockResolvedValue({
+        error: { kind: 'retry', message: 'transient' },
+        replacements: 0,
+        success: false,
+      }),
+    });
+    const runtime = new LocalSystemExecutionRuntime(service);
+
+    const output = await runtime.editFile({
+      all: false,
+      path: 'C:/foo.ts',
+      replace: 'bar',
+      search: 'foo',
+    });
+
+    expect(output.success).toBe(false);
+    expect((output.error as { kind?: string }).kind).toBe('stop');
   });
 
   it('returns a formatted success result on a successful edit', async () => {
@@ -542,5 +576,43 @@ describe('LocalSystemExecutionRuntime.executeToolCall — dispatch', () => {
     const runtime = new LocalSystemExecutionRuntime(createService());
 
     expect(await runtime.executeToolCall('runHeteroTask', {})).toBeNull();
+  });
+});
+
+describe('LocalSystemExecutionRuntime.runCommand', () => {
+  it('surfaces a pre-spawn failure reason instead of UNKNOWN_EXEC_ERROR', async () => {
+    // A command that never starts has no process, so no stderr and no exit
+    // code — the exact shape every Local Sandbox refusal takes. The reason used
+    // to be dropped, leaving the user (and the model) with a generic failure
+    // and nothing to act on.
+    const service = createService({
+      runCommand: vi.fn().mockResolvedValue({
+        error:
+          'Local Sandbox requires a working directory. Set one for this agent (or topic) and run the command again.',
+        success: false,
+      }),
+    });
+    const runtime = new LocalSystemExecutionRuntime(service);
+
+    const output = await runtime.runCommand({ command: 'whoami' } as never);
+
+    expect(output.content).toContain('Local Sandbox requires a working directory');
+    expect(output.content).not.toContain('UNKNOWN_EXEC_ERROR');
+  });
+
+  it('reports whether the command was actually sandboxed', async () => {
+    const service = createService({
+      runCommand: vi.fn().mockResolvedValue({
+        exit_code: 0,
+        sandboxed: true,
+        stdout: 'srt-sandbox',
+        success: true,
+      }),
+    });
+    const runtime = new LocalSystemExecutionRuntime(service);
+
+    const output = await runtime.runCommand({ command: 'whoami' } as never);
+
+    expect((output.state as { sandboxed?: boolean }).sandboxed).toBe(true);
   });
 });

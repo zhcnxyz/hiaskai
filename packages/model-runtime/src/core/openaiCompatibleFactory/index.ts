@@ -5,14 +5,14 @@ import debug from 'debug';
 import type { AiFullModelCard, AiModelType } from 'model-bank';
 import { LOBE_DEFAULT_MODEL_LIST } from 'model-bank';
 import type { ClientOptions } from 'openai';
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 import type { Stream } from 'openai/streaming';
 
-import { ErrorClassifier } from '../../errors';
+import { ErrorClassifier, refineErrorCode } from '../../errors';
 import {
-  isGPT5ProResponsesModel,
+  isGPTProResponsesModel,
   isResponsesAPIModel,
-  supportsGPT5ResponsesReasoningEffortNone,
+  supportsGPTResponsesReasoningEffortNone,
 } from '../../providers/openai/modelId';
 import type {
   ASROptions,
@@ -75,6 +75,7 @@ import type { OpenAIStreamOptions } from '../streams';
 import { OpenAIResponsesStream, OpenAIStream } from '../streams';
 import { type ChatPayloadForTransformStream, readableFromAsyncIterable } from '../streams/protocol';
 import { convertOpenAIResponseUsage, convertOpenAIUsage } from '../usageConverters/openai';
+import { OpenAICompatibleClient } from './client';
 import { createOpenAICompatibleImage } from './createImage';
 import { createOpenAICompatibleVideo, pollOpenAICompatibleVideoStatus } from './createVideo';
 import { transformResponseAPIToStream, transformResponseToStream } from './nonStreamToStream';
@@ -164,12 +165,12 @@ const getGenerateObjectResponsesReasoningParams = ({
   reasoning_effort,
   thinking,
 }: GenerateObjectReasoningParams & { model: string }) => {
-  if (isGPT5ProResponsesModel(model)) {
+  if (isGPTProResponsesModel(model)) {
     return reasoning_effort && reasoning_effort !== 'max' ? { reasoning: { effort: 'high' } } : {};
   }
 
   if (thinking?.type === 'disabled') {
-    return supportsGPT5ResponsesReasoningEffortNone(model) ? { reasoning: { effort: 'none' } } : {};
+    return supportsGPTResponsesReasoningEffortNone(model) ? { reasoning: { effort: 'none' } } : {};
   }
 
   return reasoning_effort && reasoning_effort !== 'max'
@@ -387,7 +388,7 @@ export const createOpenAICompatibleRuntime = <T extends Record<string, any> = an
       if (customClient?.createClient) {
         this.client = customClient.createClient(initOptions as any);
       } else {
-        this.client = new OpenAI(initOptions);
+        this.client = new OpenAICompatibleClient(initOptions);
       }
 
       this.baseURL = baseURL || this.client.baseURL;
@@ -710,7 +711,7 @@ export const createOpenAICompatibleRuntime = <T extends Record<string, any> = an
           if (customClient?.createClient) {
             this.client = customClient.createClient(initOptions);
           } else {
-            this.client = new OpenAI(initOptions);
+            this.client = new OpenAICompatibleClient(initOptions);
           }
 
           this.baseURL = targetBaseURL;
@@ -1427,6 +1428,15 @@ export const createOpenAICompatibleRuntime = <T extends Record<string, any> = an
             });
           }
 
+          case 413: {
+            return AgentRuntimeError.chat({
+              endpoint: desensitizedEndpoint,
+              error: error as any,
+              errorType: AgentRuntimeErrorType.RequestBodyTooLarge,
+              provider: this.id,
+            });
+          }
+
           default: {
             break;
           }
@@ -1520,11 +1530,18 @@ export const createOpenAICompatibleRuntime = <T extends Record<string, any> = an
         });
       }
 
+      const fallbackErrorType = RuntimeError || ErrorType.bizError;
+      const refinedErrorType = refineErrorCode({
+        errorType: String(fallbackErrorType),
+        message: typeof errorMsg === 'string' ? errorMsg : undefined,
+        provider: this.id,
+      });
+
       log('returning generic error');
       return AgentRuntimeError.chat({
         endpoint: desensitizedEndpoint,
         error: errorResult,
-        errorType: RuntimeError || ErrorType.bizError,
+        errorType: refinedErrorType ?? fallbackErrorType,
         message,
         provider: this.id,
       });

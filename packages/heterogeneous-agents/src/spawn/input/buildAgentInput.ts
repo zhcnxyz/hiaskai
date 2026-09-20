@@ -24,7 +24,7 @@ export interface BuildAgentInputOptions extends NormalizeImageOptions {
  *
  * `args` is appended to the agent's CLI argv (e.g. Codex `--image <path>`
  * pairs); `stdin` is the payload written to the child's stdin (stream-json
- * for Amp / Claude Code, raw text for Codex).
+ * for Amp / Claude Code / CodeBuddy, raw text for Codex).
  */
 export interface AgentInputPlan {
   args: string[];
@@ -46,7 +46,7 @@ const collectText = (blocks: AgentContentBlock[]): string =>
     .filter((t) => t.length > 0)
     .join('\n\n');
 
-const buildClaudeCodeStdin = async (
+const buildClaudeCompatibleStdin = async (
   blocks: AgentContentBlock[],
   options: BuildAgentInputOptions,
 ): Promise<AgentInputPlan> => {
@@ -132,15 +132,19 @@ const buildOpenCodeInput = async (
   };
 };
 
-const buildPiInput = async (
-  blocks: AgentContentBlock[],
-  options: BuildAgentInputOptions,
-): Promise<AgentInputPlan> => {
-  const imagePaths = await resolvePathInputImagePaths(blocks, options);
-  return {
-    args: imagePaths.map((imagePath) => `@${imagePath}`),
-    stdin: collectText(blocks),
-  };
+const buildPiInput = async (): Promise<AgentInputPlan> => {
+  // pi runs exclusively over the RPC transport (PiRpcSession /
+  // createPiRpcAgentHandle) — the legacy `--mode json` stdin input is gone.
+  throw new Error(
+    'pi runs over the RPC transport only — use PiRpcSession / createPiRpcAgentHandle',
+  );
+};
+
+const buildKimiCodeInput = (blocks: AgentContentBlock[]): AgentInputPlan => {
+  if (blocks.some(isImageBlock)) {
+    throw new Error('Kimi Code does not support image attachments in one-shot prompt mode.');
+  }
+  return { args: ['--prompt', collectText(blocks)], stdin: '' };
 };
 
 const buildQoderInput = async (
@@ -168,7 +172,7 @@ const buildQoderInput = async (
  * extra CLI args required to attach images. The single source of truth for
  * how each external agent CLI receives multimodal input.
  *
- * - `amp` / `claude-code`: stream-json on stdin with text + base64 image content blocks
+ * - `amp` / `claude-code` / `codebuddy`: stream-json on stdin with text + base64 image content blocks
  * - `codex`: raw text on stdin + repeatable `--image <path>` flags
  * - `opencode`: raw text on stdin + repeatable `--file <path>` flags
  * - `pi`: raw text on stdin + repeatable `@<path>` arguments
@@ -186,17 +190,21 @@ export const buildAgentInput = async (
 
   switch (agentType) {
     case 'amp':
-    case 'claude-code': {
-      return buildClaudeCodeStdin(blocks, options);
+    case 'claude-code':
+    case 'codebuddy': {
+      return buildClaudeCompatibleStdin(blocks, options);
     }
     case 'codex': {
       return buildCodexInput(blocks, options);
+    }
+    case 'kimi-code': {
+      return buildKimiCodeInput(blocks);
     }
     case 'opencode': {
       return buildOpenCodeInput(blocks, options);
     }
     case 'pi': {
-      return buildPiInput(blocks, options);
+      return buildPiInput();
     }
     case 'qoder': {
       return buildQoderInput(blocks, options);

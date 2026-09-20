@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { FilesTabs, SortType } from '@lobechat/types';
+import { agentShareFileAccessScope, FileSource, FilesTabs, SortType } from '@lobechat/types';
 import { eq, inArray } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -194,7 +194,7 @@ describe('FileModel', () => {
         fileHash: '1',
       });
 
-      await fileModel.delete(id, false);
+      await fileModel.delete(id, { removeGlobalFile: false });
 
       const file = await serverDB.query.files.findFirst({ where: eq(files.id, id) });
       const globalFile = await serverDB.query.globalFiles.findFirst({
@@ -349,6 +349,121 @@ describe('FileModel', () => {
       await expect(fileModel.deleteUnreferenced(id)).resolves.toBeUndefined();
       await expect(
         serverDB.query.files.findFirst({ where: eq(files.id, id) }),
+      ).resolves.toBeDefined();
+    });
+
+    it('derives hashless agent-share object ownership from persisted provenance', async () => {
+      const { id: silent } = await fileModel.create(
+        { fileType: 'image/png', name: 'cat.png', size: 10, url: 'files/u/plain/cat.png' },
+        false,
+      );
+      await expect(fileModel.deleteUnreferenced(silent)).resolves.toBeUndefined();
+      await expect(
+        serverDB.query.files.findFirst({ where: eq(files.id, silent) }),
+      ).resolves.toBeUndefined();
+
+      const { id } = await fileModel.create(
+        {
+          fileType: 'image/png',
+          metadata: { agentShare: { shareId: 'share-a', visitorUserId: 'visitor-a' } },
+          name: 'cat.png',
+          size: 10,
+          url: 'files/u/share/a/cat.png',
+        },
+        false,
+      );
+      await expect(fileModel.deleteUnreferenced(id)).resolves.toBeUndefined();
+      await expect(
+        serverDB.query.files.findFirst({ where: eq(files.id, id) }),
+      ).resolves.toBeDefined();
+      await expect(
+        fileModel.deleteUnreferenced(id, {
+          accessScope: agentShareFileAccessScope({
+            shareId: 'share-a',
+            visitorUserId: 'visitor-b',
+          }),
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        fileModel.deleteUnreferenced(id, {
+          accessScope: agentShareFileAccessScope({
+            shareId: 'share-a',
+            visitorUserId: 'visitor-a',
+          }),
+        }),
+      ).resolves.toMatchObject({
+        id,
+        url: 'files/u/share/a/cat.png',
+      });
+      await expect(
+        serverDB.query.files.findFirst({ where: eq(files.id, id) }),
+      ).resolves.toBeUndefined();
+
+      const { id: removalDisabled } = await fileModel.create(
+        {
+          fileType: 'image/png',
+          metadata: { agentShare: { shareId: 'share-a', visitorUserId: 'visitor-a' } },
+          name: 'dog.png',
+          size: 10,
+          url: 'files/u/share/a/dog.png',
+        },
+        false,
+      );
+      await expect(
+        fileModel.deleteUnreferenced(removalDisabled, {
+          accessScope: agentShareFileAccessScope({
+            shareId: 'share-a',
+            visitorUserId: 'visitor-a',
+          }),
+          removeGlobalFile: false,
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        serverDB.query.files.findFirst({ where: eq(files.id, removalDisabled) }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('keeps hashed rows on the global reference-count path even with share provenance', async () => {
+      await fileModel.createGlobalFile({
+        creator: userId,
+        fileType: 'image/png',
+        hashId: 'shared-hash',
+        size: 10,
+        url: 'files/u/first.png',
+      });
+      const { id: keeper } = await fileModel.create({
+        fileHash: 'shared-hash',
+        fileType: 'image/png',
+        name: 'first.png',
+        size: 10,
+        url: 'files/u/first.png',
+      });
+      const { id } = await fileModel.create({
+        fileHash: 'shared-hash',
+        fileType: 'image/png',
+        metadata: { agentShare: { shareId: 'share-a', visitorUserId: 'visitor-a' } },
+        name: 'second.png',
+        size: 10,
+        url: 'files/u/second.png',
+      });
+
+      await expect(
+        fileModel.deleteUnreferenced(id, {
+          accessScope: agentShareFileAccessScope({
+            shareId: 'share-a',
+            visitorUserId: 'visitor-a',
+          }),
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        serverDB.query.files.findFirst({ where: eq(files.id, id) }),
+      ).resolves.toBeUndefined();
+
+      await expect(
+        serverDB.query.files.findFirst({ where: eq(files.id, keeper) }),
+      ).resolves.toBeDefined();
+      await expect(
+        serverDB.query.globalFiles.findFirst({ where: eq(globalFiles.hashId, 'shared-hash') }),
       ).resolves.toBeDefined();
     });
 
@@ -781,6 +896,83 @@ describe('FileModel', () => {
         expect(result).toHaveLength(2);
       });
     });
+
+    describe('Hidden sources', () => {
+      beforeEach(async () => {
+        await serverDB.insert(files).values([
+          {
+            id: 'plain-file',
+            name: 'notes.txt',
+            userId,
+            fileType: 'text/plain',
+            size: 100,
+            url: 'plain-url',
+          },
+          {
+            id: 'acceptance-file',
+            name: 'payload-execution.txt',
+            userId,
+            fileType: 'text/plain',
+            size: 100,
+            source: FileSource.Acceptance,
+            url: 'acceptance-url',
+          },
+          {
+            id: 'agent-share-file',
+            name: 'visitor.txt',
+            userId,
+            fileType: 'text/plain',
+            metadata: { agentShare: { shareId: 'share-a', visitorUserId: 'visitor-a' } },
+            size: 100,
+            url: 'visitor-url',
+          },
+          {
+            id: 'generation-file',
+            name: 'generated.png',
+            userId,
+            fileType: 'image/png',
+            size: 100,
+            source: FileSource.ImageGeneration,
+            url: 'generation-url',
+          },
+        ]);
+      });
+
+      it('should exclude acceptance evidence and agent-share provenance', async () => {
+        const result = await fileModel.query();
+
+        expect(result.map((f) => f.id).sort()).toEqual(['generation-file', 'plain-file']);
+      });
+
+      it('should still find acceptance evidence by id', async () => {
+        const result = await fileModel.findById('acceptance-file');
+
+        expect(result?.name).toBe('payload-execution.txt');
+      });
+    });
+  });
+
+  describe('countAgentShareUsage', () => {
+    it("sums only this user's files with provenance for the given share", async () => {
+      const base = { fileType: 'text/plain', url: 'https://example.com/f' };
+      const visitorFile = (shareId: string, size: number) => ({
+        ...base,
+        metadata: { agentShare: { shareId, visitorUserId: 'visitor' } },
+        name: `${shareId}-${size}`,
+        size,
+      });
+
+      await fileModel.create(visitorFile('share-a', 10));
+      await fileModel.create(visitorFile('share-a', 20));
+      await fileModel.create(visitorFile('share-b', 40));
+      await fileModel.create({ ...base, name: 'ordinary', size: 80 });
+      // Another user's visitor file on the same share id.
+      await new FileModel(serverDB, 'user2').create(visitorFile('share-a', 160));
+
+      expect(await fileModel.countAgentShareUsage('share-a')).toBe(30);
+      expect(await fileModel.countAgentShareUsage('share-b')).toBe(40);
+      expect(await fileModel.countAgentShareUsage('share-none')).toBe(0);
+    });
   });
 
   describe('findById', () => {
@@ -801,6 +993,35 @@ describe('FileModel', () => {
         fileType: 'text/plain',
         userId,
       });
+    });
+
+    it('hides share-provenance files from ordinary reads and resolves them through the scoped API', async () => {
+      const { id } = await fileModel.create({
+        fileType: 'text/plain',
+        metadata: { agentShare: { shareId: 'share-a', visitorUserId: 'visitor-a' } },
+        name: 'visitor.txt',
+        size: 100,
+        url: 'https://example.com/visitor.txt',
+      });
+
+      await expect(fileModel.findById(id)).resolves.toBeUndefined();
+      await expect(fileModel.findByIds([id])).resolves.toEqual([]);
+      await expect(
+        fileModel.findById(id, {
+          accessScope: agentShareFileAccessScope({
+            shareId: 'share-a',
+            visitorUserId: 'visitor-a',
+          }),
+        }),
+      ).resolves.toMatchObject({ id });
+      await expect(
+        fileModel.findById(id, {
+          accessScope: agentShareFileAccessScope({
+            shareId: 'share-a',
+            visitorUserId: 'visitor-b',
+          }),
+        }),
+      ).resolves.toBeUndefined();
     });
   });
 
@@ -1164,7 +1385,7 @@ describe('FileModel', () => {
 
         // Delete file in transaction
         await serverDB.transaction(async (trx) => {
-          await fileModel.delete(id, true, trx);
+          await fileModel.delete(id, { transaction: trx });
 
           // Verify file was deleted inside the transaction
           const file = await trx.query.files.findFirst({ where: eq(files.id, id) });
@@ -1203,7 +1424,7 @@ describe('FileModel', () => {
         // Intentionally fail the transaction
         await expect(
           serverDB.transaction(async (trx) => {
-            await fileModel.delete(id, true, trx);
+            await fileModel.delete(id, { transaction: trx });
 
             // Verify file was deleted inside the transaction
             const file = await trx.query.files.findFirst({ where: eq(files.id, id) });
@@ -1246,7 +1467,7 @@ describe('FileModel', () => {
 
         // Delete file in transaction, but keep global file
         await serverDB.transaction(async (trx) => {
-          await fileModel.delete(id, false, trx);
+          await fileModel.delete(id, { removeGlobalFile: false, transaction: trx });
         });
 
         // Verify file was deleted
@@ -1283,7 +1504,7 @@ describe('FileModel', () => {
         // Delete old file and create new file in the same transaction
         const result = await serverDB.transaction(async (trx) => {
           // Delete old file
-          await fileModel.delete(deleteFileId, true, trx);
+          await fileModel.delete(deleteFileId, { transaction: trx });
 
           // Create new file
           const { id: newFileId } = await fileModel.create(
@@ -1410,7 +1631,7 @@ describe('FileModel', () => {
 
       // Insert chunks (this might need to be done through proper API)
       // For testing purposes, we'll delete the file which should trigger the batch deletion
-      await fileModel.delete(fileId, true);
+      await fileModel.delete(fileId);
 
       // Verify the file is deleted
       const deletedFile = await serverDB.query.files.findFirst({
@@ -1468,7 +1689,7 @@ describe('FileModel', () => {
       // Skip documentChunks test, requires creating documents records first
 
       // Delete file, should clean up all related data
-      const result = await fileModel.delete(fileId, true);
+      const result = await fileModel.delete(fileId);
 
       // Verify file was deleted
       const deletedFile = await serverDB.query.files.findFirst({
@@ -1526,7 +1747,7 @@ describe('FileModel', () => {
         .values([{ chunkId, embeddings: testEmbedding, model: 'test-model', userId }]);
 
       // Delete file
-      await fileModel.delete(fileId, true);
+      await fileModel.delete(fileId);
 
       // Verify file was deleted
       const deletedFile = await serverDB.query.files.findFirst({
@@ -1588,7 +1809,7 @@ describe('FileModel', () => {
       expect(kbFile).toBeDefined();
 
       // Delete file
-      await fileModel.delete(fileId, true);
+      await fileModel.delete(fileId);
 
       // Verify files in knowledge base were also completely deleted
       const deletedFile = await serverDB.query.files.findFirst({

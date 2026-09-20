@@ -1,11 +1,21 @@
 'use client';
 
 import { isDesktop } from '@lobechat/const';
-import { Center, Empty, Flexbox, Text } from '@lobehub/ui';
-import { Button, toast } from '@lobehub/ui/base-ui';
+import { Center, Empty, Flexbox } from '@lobehub/ui';
+import {
+  ActionIcon,
+  Button,
+  confirmModal,
+  DropdownMenu,
+  Tag,
+  Text,
+  toast,
+} from '@lobehub/ui/base-ui';
 import { useMutation } from '@tanstack/react-query';
 import { createStaticStyles } from 'antd-style';
-import { BookOpen, ChevronRight } from 'lucide-react';
+import dayjs from 'dayjs';
+import relativeTime from 'dayjs/plugin/relativeTime';
+import { BookOpen, Eye, MoreHorizontal, Trash } from 'lucide-react';
 import { type FC, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import urlJoin from 'url-join';
@@ -13,6 +23,7 @@ import urlJoin from 'url-join';
 import { useActiveWorkspaceId } from '@/business/client/hooks/useActiveWorkspaceId';
 import { type LiteTableColumn } from '@/components/LiteTable';
 import LiteTable from '@/components/LiteTable';
+import { isFullAccessApiKey } from '@/const/apiKeyScope';
 import { usePermission } from '@/hooks/usePermission';
 import { useClientDataSWR } from '@/libs/swr';
 import { apiKeyKeys } from '@/libs/swr/keys';
@@ -22,6 +33,7 @@ import { electronSyncSelectors } from '@/store/electron/selectors';
 import { type ApiKeyItem, type CreateApiKeyParams, type UpdateApiKeyParams } from '@/types/apiKey';
 import { isForbiddenError } from '@/utils/forbiddenError';
 
+import { useWorkspaceApiKeyPolicy } from '../WorkspaceApiKeyPolicyContext';
 import ApiKeyDetail from './ApiKeyDetail';
 import { ApiKeyDisplay, createApiKeyModal } from './index';
 
@@ -32,25 +44,22 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
     border-radius: ${cssVar.borderRadius};
     background: ${cssVar.colorBgContainer};
   `,
-  /* Always visible, not reveal-on-hover: the row's only job besides browsing is
-     to lead into the detail drawer, and a marker you must hover to discover
-     doesn't advertise that. Quiet by default, darker under the cursor. */
-  enterIcon: css`
-    color: ${cssVar.colorTextQuaternary};
-    transition: color 0.2s ease;
-
-    tr:hover & {
-      color: ${cssVar.colorText};
-    }
+  expired: css`
+    color: ${cssVar.colorError};
   `,
   header: css`
     display: flex;
     gap: 16px;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
 
     padding-block-end: 16px;
     padding-inline: 24px;
+  `,
+  /* Dates and "never used / never expires" placeholders read as metadata, not
+     content — keep them quieter than the name and key. */
+  muted: css`
+    color: ${cssVar.colorTextTertiary};
   `,
   /* The name doubles as the entry point into the detail drawer. */
   nameLink: css`
@@ -62,28 +71,32 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
 }));
 
+dayjs.extend(relativeTime);
+
+const isExpired = (apiKey: ApiKeyItem) =>
+  !!apiKey.expiresAt && dayjs(apiKey.expiresAt).isBefore(dayjs());
+
 const ApiKey: FC = () => {
   const { t } = useTranslation('auth');
   const { t: tc } = useTranslation('common');
   const activeWorkspaceId = useActiveWorkspaceId();
+  const workspacePolicy = useWorkspaceApiKeyPolicy();
 
   const { allowed: canEdit, reason } = usePermission('create_content');
   // Desktop renders from app://renderer, where a relative href is denied by the
   // window-open handler — resolve the docs link against the active server origin.
   const remoteServerUrl = useElectronStore(electronSyncSelectors.remoteServerUrl);
   const docsHref = isDesktop ? urlJoin(remoteServerUrl, '/api/v1/docs') : '/api/v1/docs';
-  // Workspace API keys are shared admin config: the server gates every
-  // mutation (create included) at Admin-or-higher
-  // (`requireWorkspaceRoleWhenScoped('admin')`), with no per-row creator
-  // check — mirror that here so Admins can manage keys created by other
-  // members and Members don't get an enabled create flow that always 403s.
-  const { allowed: canManageKeys } = usePermission('manage_settings');
-  const canCreate = canEdit && (!activeWorkspaceId || canManageKeys);
-  const checkManageable = (_creatorUserId?: string | null) => !activeWorkspaceId || canManageKeys;
+  const canCreate = canEdit && (!activeWorkspaceId || workspacePolicy.canCreate);
+  const isMemberCreationRestricted =
+    !!activeWorkspaceId && !workspacePolicy.isAdmin && !workspacePolicy.canCreate;
   const manageTooltip = tc(
     'manageOnlyCreator',
     'Only the creator or a workspace owner can do this',
   );
+  const createTooltip = workspacePolicy.canCreate
+    ? reason
+    : t('apikey.list.actions.creationRestricted');
 
   const { data, isLoading, mutate } = useClientDataSWR<ApiKeyItem[]>(apiKeyKeys.list(), () =>
     lambdaClient.apiKey.getApiKeys.query(),
@@ -104,6 +117,7 @@ const ApiKey: FC = () => {
 
   const createMutation = useMutation({
     mutationFn: (params: CreateApiKeyParams) => lambdaClient.apiKey.createApiKey.mutate(params),
+    onError: notifyMutationError,
     onSuccess: () => {
       mutate();
     },
@@ -129,11 +143,25 @@ const ApiKey: FC = () => {
   const handleCreate = () => {
     if (!canCreate) return;
     createApiKeyModal({
-      onSubmit: async (values) => {
-        await createMutation.mutateAsync(values);
-      },
+      onSubmit: async (values) => createMutation.mutateAsync(values),
     });
   };
+
+  const confirmDelete = (apiKey: ApiKeyItem) => {
+    confirmModal({
+      cancelText: t('apikey.list.actions.deleteConfirm.actions.cancel'),
+      content: t('apikey.list.actions.deleteConfirm.content'),
+      okButtonProps: { danger: true },
+      okText: t('apikey.list.actions.deleteConfirm.actions.ok'),
+      onOk: async () => {
+        await deleteMutation.mutateAsync(apiKey.id);
+      },
+      title: t('apikey.list.actions.deleteConfirm.title'),
+    });
+  };
+
+  const canDeleteRow = (apiKey: ApiKeyItem) =>
+    canEdit && (apiKey.isMine !== false || workspacePolicy.isAdmin);
 
   const columns: LiteTableColumn<ApiKeyItem>[] = [
     {
@@ -141,7 +169,12 @@ const ApiKey: FC = () => {
       listSlot: 'title',
       // The name is the affordance into the detail drawer — styled as a link so
       // the row reads as navigable rather than inert.
-      render: (apiKey) => <span className={styles.nameLink}>{apiKey.name}</span>,
+      render: (apiKey) => (
+        <Flexbox horizontal align={'center'} gap={8}>
+          <span className={styles.nameLink}>{apiKey.name}</span>
+          {apiKey.enabled === false && <Tag>{t('apikey.status.disabled')}</Tag>}
+        </Flexbox>
+      ),
       title: t('apikey.list.columns.name'),
     },
     {
@@ -162,11 +195,23 @@ const ApiKey: FC = () => {
         </span>
       ),
       title: t('apikey.list.columns.key'),
-      width: 230,
+      width: 220,
     },
-    // Scopes are deliberately absent from the list: the column could only ever
-    // truncate, and the detail drawer (row click) shows the full grant list.
-    ...(activeWorkspaceId
+    // A count summary can't truncate, so scopes earn a list column; the full
+    // grant list still lives in the detail drawer (row click).
+    {
+      key: 'scopes',
+      render: (apiKey) => (
+        <Tag>
+          {isFullAccessApiKey(apiKey.scopes)
+            ? t('apikey.scopes.fullAccess')
+            : t('apikey.scopes.count', { count: apiKey.scopes?.length ?? 0 })}
+        </Tag>
+      ),
+      title: t('apikey.list.columns.scopes'),
+      width: 110,
+    },
+    ...(activeWorkspaceId && workspacePolicy.isAdmin
       ? [
           {
             key: 'creator',
@@ -178,39 +223,92 @@ const ApiKey: FC = () => {
       : []),
     {
       key: 'expiresAt',
-      render: (apiKey) => apiKey.expiresAt?.toLocaleString() || t('apikey.display.neverExpires'),
+      render: (apiKey) =>
+        apiKey.expiresAt ? (
+          <span
+            className={isExpired(apiKey) ? styles.expired : undefined}
+            title={apiKey.expiresAt.toLocaleString()}
+          >
+            {isExpired(apiKey) ? t('apikey.status.expired') : apiKey.expiresAt.toLocaleDateString()}
+          </span>
+        ) : (
+          <span className={styles.muted}>{t('apikey.display.neverExpires')}</span>
+        ),
       title: t('apikey.list.columns.expiresAt'),
-      width: 170,
+      width: 130,
     },
     {
       key: 'lastUsedAt',
       render: (apiKey: ApiKeyItem) =>
-        apiKey.lastUsedAt?.toLocaleString() || t('apikey.display.neverUsed'),
+        apiKey.lastUsedAt ? (
+          // Relative time answers "is this key still in use?" at a glance; the
+          // exact timestamp stays one hover away.
+          <span title={apiKey.lastUsedAt.toLocaleString()}>
+            {dayjs(apiKey.lastUsedAt).fromNow()}
+          </span>
+        ) : (
+          <span className={styles.muted}>{t('apikey.display.neverUsed')}</span>
+        ),
       title: t('apikey.list.columns.lastUsedAt'),
     },
-    // Every management action (rename, expiry, enable/disable, delete) lives in
-    // the detail drawer: the list browses, the drawer owns one key's surface.
+    // Browse actions stay on the row (Vercel-token style); the drawer remains
+    // the full management surface for rename / expiry / scopes. In the narrow
+    // card layout the menu sits beside the name (`extra`), not under the meta.
     {
-      key: 'enter',
-      render: () => <ChevronRight className={styles.enterIcon} size={16} />,
+      key: 'actions',
+      listSlot: 'extra',
+      render: (apiKey) => (
+        <span onClick={(e) => e.stopPropagation()}>
+          <DropdownMenu
+            placement={'bottomRight'}
+            items={[
+              {
+                icon: Eye,
+                key: 'view',
+                label: t('apikey.list.actions.viewDetails'),
+                onClick: () => setDetailId(apiKey.id),
+              },
+              {
+                danger: true,
+                disabled: !canDeleteRow(apiKey),
+                icon: Trash,
+                key: 'delete',
+                label: t('apikey.list.actions.delete'),
+                onClick: () => confirmDelete(apiKey),
+              },
+            ]}
+          >
+            <ActionIcon
+              icon={MoreHorizontal}
+              size={'small'}
+              title={t('apikey.list.actions.more')}
+            />
+          </DropdownMenu>
+        </span>
+      ),
       title: '',
-      width: 40,
+      width: 48,
     },
   ];
 
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <Text as={'h3'} style={{ fontSize: 16, fontWeight: 500, margin: 0 }}>
-          {t('apikey.list.title')}
-        </Text>
+        <Flexbox gap={4}>
+          <Text as={'h3'} style={{ fontSize: 16, fontWeight: 500, margin: 0 }}>
+            {t('apikey.list.title')}
+          </Text>
+          <Text style={{ fontSize: 13 }} type={'secondary'}>
+            {t('apikey.list.desc')}
+          </Text>
+        </Flexbox>
         <Flexbox horizontal gap={8}>
           <Button href={docsHref} icon={BookOpen} target="_blank" type="text">
             {t('apikey.list.actions.viewDocs')}
           </Button>
           <Button
             disabled={!canCreate}
-            title={canCreate ? undefined : canEdit ? manageTooltip : reason}
+            title={canCreate ? undefined : createTooltip}
             type="primary"
             onClick={handleCreate}
           >
@@ -225,21 +323,38 @@ const ApiKey: FC = () => {
         rowKey={(apiKey) => apiKey.id}
         emptyText={
           <Center height={240} width={'100%'}>
-            <Empty description={t('apikey.list.empty')} />
+            <Empty
+              description={t(
+                isMemberCreationRestricted
+                  ? 'apikey.list.restrictedEmpty.desc'
+                  : 'apikey.list.empty',
+              )}
+              title={
+                isMemberCreationRestricted ? t('apikey.list.restrictedEmpty.title') : undefined
+              }
+            />
           </Center>
         }
         onRowClick={(apiKey) => setDetailId(apiKey.id)}
       />
       <ApiKeyDetail
         apiKey={detailApiKey}
-        canManage={canEdit && (detailApiKey ? checkManageable(detailApiKey.userId) : false)}
+        canDelete={canEdit && !!detailApiKey && canDeleteRow(detailApiKey)}
+        canEdit={canEdit && !!detailApiKey && detailApiKey.isMine !== false}
         manageTooltip={canEdit ? manageTooltip : (reason ?? manageTooltip)}
         open={!!detailApiKey}
         onClose={() => setDetailId(undefined)}
-        onUpdate={(id, params) => updateMutation.mutate({ id, params })}
         onDelete={async (id) => {
           await deleteMutation.mutateAsync(id);
           setDetailId(undefined);
+        }}
+        onUpdate={async (id, params) => {
+          try {
+            await updateMutation.mutateAsync({ id, params });
+            return true;
+          } catch {
+            return false;
+          }
         }}
       />
     </div>

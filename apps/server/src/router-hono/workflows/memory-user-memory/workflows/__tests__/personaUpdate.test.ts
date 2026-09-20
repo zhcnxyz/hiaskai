@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createStepRunner } from '@/server/workflows/testing/stepContext';
+
 const mocks = vi.hoisted(() => ({
   buildUserPersonaJobInput: vi.fn(),
   checkGuard: vi.fn(),
@@ -15,7 +17,9 @@ vi.mock('@/database/server', () => ({
 
 vi.mock('@/server/services/memory/userMemory/persona/service', () => ({
   buildUserPersonaJobInput: mocks.buildUserPersonaJobInput,
-  UserPersonaService: vi.fn(() => ({ composeWriting: mocks.composeWriting })),
+  UserPersonaService: vi.fn(function () {
+    return { composeWriting: mocks.composeWriting };
+  }),
 }));
 
 vi.mock('../runGuard', () => ({
@@ -62,7 +66,7 @@ describe('personaUpdateHandler run guard', () => {
 
     const context = {
       requestPayload: { userIds: ['user-1'] },
-      run: vi.fn((_name: string, callback: () => unknown) => callback()),
+      run: createStepRunner(),
       workflowRunId: 'wfr_persona',
     };
 
@@ -97,7 +101,7 @@ describe('personaUpdateHandler run guard', () => {
         hourlyTaskId: '00000000-0000-4000-8000-000000000001',
         userIds: ['user-1'],
       },
-      run: vi.fn((_name: string, callback: () => unknown) => callback()),
+      run: createStepRunner(),
       workflowRunId: 'wfr_persona',
     };
 

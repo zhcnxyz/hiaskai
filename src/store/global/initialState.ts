@@ -138,6 +138,8 @@ export const MODEL_DETAIL_PANEL_EXPANDABLE_KEYS = [
   'config',
 ] as const satisfies readonly ModelDetailPanelExpandedKey[];
 
+export type TaskViewMode = 'kanban' | 'list';
+
 export const DEFAULT_HOME_SIDEBAR_EXPANDED_KEYS = ['recents', 'agent', 'private'];
 
 export interface SystemStatus {
@@ -214,6 +216,12 @@ export interface SystemStatus {
   hidePWAInstaller?: boolean;
   hideThreadLimitAlert?: boolean;
   hideTopicSharePrivacyWarning?: boolean;
+  /**
+   * Home rail: the goals card folded to its title. Persisted, because a card
+   * you deliberately put away must stay away across reloads — otherwise the
+   * affordance is only a scroll trick.
+   */
+  homeGoalsCollapsed?: boolean;
   homeRecentsCount?: number;
   /**
    * Agent picked from the home AgentSelect dropdown. When unset the home page
@@ -334,6 +342,8 @@ export interface SystemStatus {
   showVerifyReportPanel?: boolean;
   showVideoPanel?: boolean;
   showVideoTopicPanel?: boolean;
+  /** Visibility of the lightweight chat overview card. Independent from the workspace panel. */
+  showWorkingOverview?: boolean;
   /**
    * Flat ordered list of sidebar items.
    */
@@ -359,13 +369,20 @@ export interface SystemStatus {
    * Whether the right-side "Hidden columns" panel on the Kanban board is collapsed.
    */
   taskKanbanHiddenPanelCollapsed?: boolean;
+  /**
+   * Display mode for the tasks page. Persisted so a manually selected board or
+   * list view survives navigation and page reloads.
+   */
+  taskListViewMode?: TaskViewMode;
   taskListViewOptions?: {
-    groupBy: 'assignee' | 'none' | 'priority' | 'status';
+    groupBy: 'assignee' | 'member' | 'none' | 'priority' | 'status';
     hideCompleted: boolean;
+    nestedSubTasks: boolean;
     orderBy: 'assignee' | 'createdAt' | 'priority' | 'status' | 'title' | 'updatedAt';
     orderCompletedByRecency: boolean;
     orderDirection: 'asc' | 'desc';
-    subGroupBy: 'assignee' | 'none' | 'priority' | 'status';
+    showSubTasks: boolean;
+    subGroupBy: 'assignee' | 'member' | 'none' | 'priority' | 'status';
   };
   /**
    * Height of the chat bottom terminal panel. Persisted so resizing survives remounts.
@@ -502,11 +519,14 @@ export const INITIAL_STATUS = {
   taskListViewOptions: {
     groupBy: 'status',
     hideCompleted: true,
+    nestedSubTasks: true,
     orderBy: 'updatedAt',
     orderCompletedByRecency: true,
     orderDirection: 'asc',
+    showSubTasks: false,
     subGroupBy: 'none',
   },
+  taskListViewMode: 'list' as const,
   taskKanbanHiddenColumns: ['done', 'canceled'],
   taskKanbanHiddenPanelCollapsed: false,
   disabledModelProvidersSortType: 'default',
@@ -521,6 +541,7 @@ export const INITIAL_STATUS = {
   hidePWAInstaller: false,
   hideThreadLimitAlert: false,
   hideTopicSharePrivacyWarning: false,
+  homeGoalsCollapsed: false,
   homeRecentsCount: 8,
   homeTaskCount: 8,
   imagePanelWidth: 320,

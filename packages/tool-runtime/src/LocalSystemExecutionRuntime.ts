@@ -101,6 +101,9 @@ export interface ExecuteLocalToolOptions {
  * into the camelCase format expected by ComputerRuntime.
  */
 export class LocalSystemExecutionRuntime extends ComputerRuntime {
+  /** `lobe-local-system`'s `getCommandOutput` takes a `timeout`; see its manifest. */
+  protected readonly supportsObservationTimeout = true;
+
   private service: ILocalSystemService;
 
   constructor(service: ILocalSystemService) {
@@ -409,6 +412,16 @@ export class LocalSystemExecutionRuntime extends ComputerRuntime {
       case 'runCommand': {
         // RunCommandResult has snake_case fields from local-file-shell
         return {
+          // Surface raw.error at the top level so ComputerRuntime.errorOutput
+          // has a real message to render. Its priority chain reads the
+          // ServiceResult's own `error`, then `state.stderr`, then
+          // `state.error` — a runCommand that fails before spawning fills none
+          // of those (there is no process, so no stderr), so every such failure
+          // collapsed to the generic "[UNKNOWN_EXEC_ERROR] Tool execution
+          // failed" with the reason discarded. That hid, among others, every
+          // Local Sandbox refusal: "requires a working directory", "unavailable
+          // on this device". Mirrors editLocalFile / grep / glob below.
+          error: raw.error ? { message: String(raw.error) } : undefined,
           result: {
             error: raw.error,
             exitCode: raw.exit_code,
@@ -420,6 +433,12 @@ export class LocalSystemExecutionRuntime extends ComputerRuntime {
             // The picker's chip only shows the user's intent, and a run that
             // lost the flag somewhere in between looks identical otherwise.
             sandboxed: raw.sandboxed,
+            // Liveness and the terminating signal: `exit_code` alone cannot
+            // tell a running command from a killed one (see
+            // `GetCommandOutputResult`), and dropping them here is what forced
+            // the consumer to guess.
+            running: raw.running,
+            signal: raw.signal,
             stderr: raw.stderr,
             stdout: raw.stdout,
             success: raw.success,
@@ -435,6 +454,8 @@ export class LocalSystemExecutionRuntime extends ComputerRuntime {
             exitCode: raw.exit_code,
             error: raw.error,
             outputFiles: raw.output_files,
+            running: raw.running,
+            signal: raw.signal,
             stderr: raw.stderr,
             stdout: raw.stdout,
             success: raw.success,

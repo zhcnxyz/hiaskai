@@ -266,6 +266,12 @@ describe('StreamEventManager', () => {
       const finalState = {
         cost: { total: 42 },
         error: { message: 'boom', type: 'BoomError' },
+        expertise: {
+          contentHash: 'hash',
+          domains: [{ id: 'product-design', lessonIds: ['lesson-1'] }],
+          renderedContext: '<expertise>heavy learned context</expertise>',
+          schemaVersion: 1,
+        },
         messages,
         operationToolSet: { enabledToolIds: ['x'] },
         status: 'error',
@@ -291,6 +297,7 @@ describe('StreamEventManager', () => {
       const parsed = JSON.parse(dataArg);
 
       // Stripped: heavy / reconstructible fields gone
+      expect(parsed.finalState.expertise).toBeUndefined();
       expect(parsed.finalState.messages).toBeUndefined();
       expect(parsed.finalState.operationToolSet).toBeUndefined();
       expect(parsed.finalState.toolManifestMap).toBeUndefined();
@@ -308,6 +315,49 @@ describe('StreamEventManager', () => {
       // finalState passed as a param, so the error message survives.
       expect(parsed.reasonDetail).toBe('boom');
     });
+  });
+
+  it.each([undefined, 'execution_complete'])(
+    'omits finalState from persisted step_complete events (phase=%s)',
+    async (phase) => {
+      const finalState = { initialContext: { prompt: 'context' }, status: 'done' };
+      const data = { finalState, ...(phase && { phase, reason: 'done' }) };
+      mockRedis.xadd.mockResolvedValue('event-1');
+
+      await streamManager.publishStreamEvent('op-1', {
+        data,
+        stepIndex: 1,
+        type: 'step_complete',
+      });
+
+      const args = mockRedis.xadd.mock.calls[0];
+      const stored = JSON.parse(args[args.indexOf('data') + 1]);
+      expect(stored).toEqual(phase ? { phase, reason: 'done' } : {});
+      expect(data.finalState).toBe(finalState);
+    },
+  );
+
+  it('persists an opted-in state snapshot while omitting reconstructible message bodies', async () => {
+    const finalState = {
+      host: { includeFinalState: true },
+      initialContext: { prompt: 'context' },
+      messages: [{ content: 'large history' }],
+      status: 'done',
+    };
+    mockRedis.xadd.mockResolvedValue('event-1');
+    await streamManager.publishStreamEvent('op-1', {
+      data: { finalState, phase: 'execution_complete', reason: 'done' },
+      stepIndex: 1,
+      type: 'step_complete',
+    });
+    const args = mockRedis.xadd.mock.calls[0];
+    const stored = JSON.parse(args[args.indexOf('data') + 1]);
+    expect(stored.finalState).toEqual({
+      host: { includeFinalState: true },
+      initialContext: { prompt: 'context' },
+      status: 'done',
+    });
+    expect(finalState.messages).toHaveLength(1);
   });
 
   describe('readEventsOnce', () => {
@@ -475,6 +525,12 @@ describe('StreamEventManager', () => {
       const result = stripFinalStateInEventData({
         finalState: {
           cost: { total: 1 },
+          expertise: {
+            contentHash: 'hash',
+            domains: [],
+            renderedContext: '<expertise>heavy learned context</expertise>',
+            schemaVersion: 1,
+          },
           messages: [{ role: 'user' }],
           operationToolSet: {},
           status: 'done',

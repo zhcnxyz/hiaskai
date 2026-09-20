@@ -1,4 +1,6 @@
-import { writeSync } from 'node:fs';
+import { existsSync, rmSync, writeSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, relative } from 'node:path';
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,15 +17,6 @@ vi.mock('electron', () => ({
   ipcMain: {
     handle: ipcMainHandleMock,
   },
-}));
-
-vi.mock('@/utils/logger', () => ({
-  createLogger: () => ({
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  }),
 }));
 
 // Mock child_process for the shared package
@@ -507,6 +500,35 @@ describe('ShellCommandCtr (thin wrapper)', () => {
         });
 
         expect((await ctr.getSandboxCapability()).canInstall).toBe(false);
+      });
+    });
+
+    describe('default workspace', () => {
+      it('creates a per-agent directory and returns its real path', async () => {
+        const result = await ctr.ensureSandboxWorkspace({ agentId: 'agt_abc123' });
+
+        expect(result.path).toBeDefined();
+        expect(result.path).toContain('LobeHub');
+        expect(result.path).toContain('agt_abc123');
+        // The policy layer resolves fence roots with realpath and rejects a
+        // path that does not exist, so the directory must be real by now.
+        expect(existsSync(result.path!)).toBe(true);
+
+        rmSync(result.path!, { force: true, recursive: true });
+      });
+
+      it('never lets an agent id escape the workspace root', async () => {
+        // The id becomes a path segment and is opaque to this process, so a
+        // traversal attempt must land inside the sandbox root like any other
+        // name — this directory is about to become a writable fence root.
+        const root = join(homedir(), 'LobeHub', 'sandbox');
+        const result = await ctr.ensureSandboxWorkspace({ agentId: '../../Windows/System32' });
+
+        expect(result.path).toBeDefined();
+        expect(result.path!.startsWith(root)).toBe(true);
+        expect(relative(root, result.path!)).not.toContain('..');
+
+        rmSync(result.path!, { force: true, recursive: true });
       });
     });
 

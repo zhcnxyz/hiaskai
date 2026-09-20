@@ -39,6 +39,7 @@ describe('hasApiKeyScope', () => {
   it('write implies read', () => {
     expect(hasApiKeyScope(['chat:write'], 'chat:read')).toBe(true);
     expect(hasApiKeyScope(['chat:read'], 'chat:write')).toBe(false);
+    expect(hasApiKeyScope(['mcp:write'], 'mcp:read')).toBe(true);
   });
 
   it('full access satisfies everything', () => {
@@ -153,6 +154,10 @@ describe('requiredApiKeyScopeForTrpc', () => {
     expect(requiredApiKeyScopeForTrpc('workspaceMember.remove', 'mutation')).toEqual({
       blocked: true,
     });
+    expect(requiredApiKeyScopeForTrpc('usage.findByMonth', 'query')).toEqual({
+      scopes: ['usage:read'],
+    });
+    expect(requiredApiKeyScopeForTrpc('usage.reset', 'mutation')).toEqual({ blocked: true });
   });
 
   it('blocks sensitive nested sub-surfaces regardless of the parent namespace', () => {
@@ -161,6 +166,14 @@ describe('requiredApiKeyScopeForTrpc', () => {
       blocked: true,
     });
     expect(requiredApiKeyScopeForTrpc('market.oidc.getToken', 'query')).toEqual({ blocked: true });
+    // gateway token minting: a restricted key must never obtain a user JWT
+    // that `oidcAuth` would accept as unscoped auth
+    expect(requiredApiKeyScopeForTrpc('aiAgent.refreshGatewayToken', 'query')).toEqual({
+      blocked: true,
+    });
+    expect(requiredApiKeyScopeForTrpc('aiAgent.issueGatewayUserToken', 'query')).toEqual({
+      blocked: true,
+    });
     // the rest of the market surface keeps its agent scopes
     expect(requiredApiKeyScopeForTrpc('market.getAgentsByPlugin', 'query')).toEqual({
       scopes: ['agent:read'],

@@ -1,6 +1,8 @@
 import { AsyncTaskStatus } from '@lobechat/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createStepRunner } from '@/server/workflows/testing/stepContext';
+
 import { hourlyWorkflowHandler } from '../hourly';
 
 const mocks = vi.hoisted(() => ({
@@ -42,12 +44,14 @@ vi.mock('@/server/services/memory/userMemory/extract', () => ({
 }));
 
 vi.mock('@/database/models/asyncTask', () => ({
-  AsyncTaskModel: vi.fn(() => ({
-    appendUserMemoryWorkflowRunIds: mocks.appendUserMemoryWorkflowRunIds,
-    isHourlyMemoryExtractionCancellationRequested:
-      mocks.isHourlyMemoryExtractionCancellationRequested,
-    markHourlyMemoryExtractionSuccess: mocks.markHourlyMemoryExtractionSuccess,
-  })),
+  AsyncTaskModel: vi.fn(function () {
+    return {
+      appendUserMemoryWorkflowRunIds: mocks.appendUserMemoryWorkflowRunIds,
+      isHourlyMemoryExtractionCancellationRequested:
+        mocks.isHourlyMemoryExtractionCancellationRequested,
+      markHourlyMemoryExtractionSuccess: mocks.markHourlyMemoryExtractionSuccess,
+    };
+  }),
 }));
 
 vi.mock('@/database/server', () => ({
@@ -89,7 +93,7 @@ describe('hourlyWorkflowHandler', () => {
      */
     const context = {
       requestPayload: { dryRun: true },
-      run: vi.fn((_name: string, callback: () => unknown) => callback()),
+      run: createStepRunner(),
       workflowRunId: 'entry-hourly-run',
     };
 
@@ -140,7 +144,7 @@ describe('hourlyWorkflowHandler', () => {
         dryRun: true,
         hourlyTaskId: '00000000-0000-4000-8000-000000000001',
       },
-      run: vi.fn((_name: string, callback: () => unknown) => callback()),
+      run: createStepRunner(),
     };
 
     await expect(hourlyWorkflowHandler(context as never)).resolves.toMatchObject({
@@ -174,7 +178,7 @@ describe('hourlyWorkflowHandler', () => {
 
     const context = {
       requestPayload: { hourlyTaskId: '00000000-0000-4000-8000-000000000001' },
-      run: vi.fn((_name: string, callback: () => unknown) => callback()),
+      run: createStepRunner(),
     };
 
     await expect(hourlyWorkflowHandler(context as never)).resolves.toMatchObject({
@@ -207,7 +211,7 @@ describe('hourlyWorkflowHandler', () => {
 
     const context = {
       requestPayload: { hourlyTaskId: '00000000-0000-4000-8000-000000000001' },
-      run: vi.fn((_name: string, callback: () => unknown) => callback()),
+      run: createStepRunner(),
     };
 
     await expect(hourlyWorkflowHandler(context as never)).resolves.toEqual({
@@ -225,7 +229,7 @@ describe('hourlyWorkflowHandler', () => {
 
     const context = {
       requestPayload: { hourlyTaskId: '00000000-0000-4000-8000-000000000001' },
-      run: vi.fn((_name: string, callback: () => unknown) => callback()),
+      run: createStepRunner(),
     };
 
     await expect(hourlyWorkflowHandler(context as never)).resolves.toMatchObject({

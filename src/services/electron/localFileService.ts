@@ -6,12 +6,15 @@ import {
   type DeviceSandboxInstallResult,
   type EditLocalFileParams,
   type EditLocalFileResult,
+  type EnsureSandboxWorkspaceParams,
+  type EnsureSandboxWorkspaceResult,
   type GetCommandOutputParams,
   type GetCommandOutputResult,
   type GlobFilesParams,
   type GlobFilesResult,
   type GrepContentParams,
   type GrepContentResult,
+  type HashLocalFileParams,
   type KillCommandParams,
   type KillCommandResult,
   type ListLocalFileParams,
@@ -175,6 +178,19 @@ const fetchLocalFilePreview = async (
   return { contentType, type: 'binary' };
 };
 
+const fetchLocalFileBytes = async (
+  url: string,
+): Promise<{ bytes: Uint8Array; contentType: string } | undefined> => {
+  const response = await fetch(url);
+  if (!response.ok) return;
+
+  return {
+    bytes: new Uint8Array(await response.arrayBuffer()),
+    contentType:
+      normalizeContentType(response.headers.get('content-type')) || 'application/octet-stream',
+  };
+};
+
 class LocalFileService {
   // File Operations
   async listLocalFiles(params: ListLocalFileParams): Promise<ListLocalFilesResult> {
@@ -183,6 +199,10 @@ class LocalFileService {
 
   async readLocalFile(params: LocalReadFileParams): Promise<LocalReadFileResult> {
     return ensureElectronIpc().localSystem.readFile(params);
+  }
+
+  async hashLocalFile(params: HashLocalFileParams): Promise<string> {
+    return ensureElectronIpc().localSystem.hashLocalFile(params);
   }
 
   async readLocalFiles(params: LocalReadFilesParams): Promise<LocalReadFileResult[]> {
@@ -242,6 +262,34 @@ class LocalFileService {
     return fetchLocalFilePreview(result.url, params.accept, params.resourceScope);
   }
 
+  async readLocalFileBytes(
+    params: LocalFilePreviewUrlParams,
+  ): Promise<{ bytes: Uint8Array; contentType: string } | undefined> {
+    const result = await ensureElectronIpc().localSystem.getLocalFilePreviewUrl(params);
+
+    if (!result.success || !result.url) return;
+
+    return fetchLocalFileBytes(result.url);
+  }
+
+  async readExternalAssetForPublish(params: {
+    path: string;
+    workingDirectory: string;
+  }): Promise<{ bytes: Uint8Array; contentType: string } | undefined> {
+    const result = await ensureElectronIpc().localSystem.getExternalAssetForPublishUrl(params);
+    if (!result.success || !result.url) return;
+
+    return fetchLocalFileBytes(result.url);
+  }
+
+  async copyAssetForPublish(params: {
+    from: string;
+    to: string;
+    workingDirectory: string;
+  }): Promise<{ error?: string; success: boolean }> {
+    return ensureElectronIpc().localSystem.copyAssetForPublish(params);
+  }
+
   async prepareSkillDirectory(
     params: PrepareSkillDirectoryParams,
   ): Promise<PrepareSkillDirectoryResult> {
@@ -278,6 +326,17 @@ class LocalFileService {
    */
   async installSandbox(): Promise<DeviceSandboxInstallResult> {
     return ensureElectronIpc().shellCommand.installSandbox();
+  }
+
+  /**
+   * Create (and return) the default directory a sandboxed agent should work in.
+   * The caller persists it as the agent's working directory, so the default is
+   * visible and changeable rather than hidden.
+   */
+  async ensureSandboxWorkspace(
+    params: EnsureSandboxWorkspaceParams,
+  ): Promise<EnsureSandboxWorkspaceResult> {
+    return ensureElectronIpc().shellCommand.ensureSandboxWorkspace(params);
   }
 
   async getCommandOutput(params: GetCommandOutputParams): Promise<GetCommandOutputResult> {

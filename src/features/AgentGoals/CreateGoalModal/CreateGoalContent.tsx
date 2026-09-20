@@ -1,16 +1,15 @@
 'use client';
 
+import { resolveGoalAttemptBudget } from '@lobechat/builtin-tool-goal';
 import type { CreateGoalParams, GoalCriterionDraft } from '@lobechat/builtin-tool-task';
-import { openCriterionEditModal } from '@lobechat/builtin-tool-task/client';
 import { DEFAULT_GOAL_MAX_ROUNDS } from '@lobechat/const/verify';
 import { useEditor } from '@lobehub/editor/react';
-import { ActionIcon, Flexbox, Icon, Text } from '@lobehub/ui';
-import { Button, toast, useModalContext } from '@lobehub/ui/base-ui';
+import { Flexbox, Icon } from '@lobehub/ui';
+import { ActionIcon, Button, Text, toast, useModalContext } from '@lobehub/ui/base-ui';
 import { InputNumber } from 'antd';
 import { createStaticStyles, cssVar } from 'antd-style';
 import {
   ArrowLeft,
-  CircleDashed,
   Paperclip,
   Pencil,
   PencilLine,
@@ -19,22 +18,25 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { type KeyboardEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type KeyboardEvent, memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { useActiveWorkspaceId } from '@/business/client/hooks/useActiveWorkspaceId';
-import AssigneeAvatar from '@/features/AgentTasks/features/AssigneeAvatar';
-import TaskVisibilityChipLabel from '@/features/AgentTasks/features/TaskVisibilityChipLabel';
-import TaskVisibilityTag from '@/features/AgentTasks/features/TaskVisibilityTag';
-import { useAgentDisplayMeta } from '@/features/AgentTasks/shared/useAgentDisplayMeta';
-import { useAgentVisibility } from '@/features/AgentTasks/shared/useAgentVisibility';
+import GeneratingBorder from '@/components/GeneratingBorder';
+import NeuralNetworkLoading from '@/components/NeuralNetworkLoading';
+import {
+  CriterionList,
+  CriterionRequiredChip,
+  CriterionRow,
+  openCriterionEditModal,
+} from '@/features/Acceptance';
 import { EditorCanvas } from '@/features/EditorCanvas';
 import { pickAndInsertAttachments } from '@/features/EditorCanvas/editorAttachments';
 import { usePermission } from '@/hooks/usePermission';
-import { verifyService } from '@/services/verify';
-import { useTaskStore } from '@/store/task';
+import { goalService } from '@/services/goal';
+import { shinyTextStyles } from '@/styles';
 
-import { buildGoalTaskConfig, deriveInitialGoalCriterionTitle } from './goalConfig';
+import { buildGoalCreateInput, buildReviewedGoalContent } from './goalConfig';
+import { createFallbackGoalCriterion, generateGoalCriteria } from './goalCriteria';
 import { deriveGoalTitle } from './goalTitle';
 
 const styles = createStaticStyles(({ css }) => ({
@@ -65,32 +67,66 @@ const styles = createStaticStyles(({ css }) => ({
     inset-inline-end: 14px;
   `,
   criteriaList: css`
-    overflow: hidden;
     overflow-y: auto;
     max-height: 320px;
-    padding: 0;
-  `,
-  criterion: css`
-    cursor: pointer;
-    padding-block: 10px;
-
-    & + & {
-      border-block-start: 1px solid ${cssVar.colorBorderSecondary};
-    }
-
-    &:hover {
-      background: ${cssVar.colorFillQuaternary};
-    }
-  `,
-  criterionIndex: css`
-    flex: none;
-    font-size: 12px;
-    color: ${cssVar.colorTextTertiary};
   `,
   footer: css`
     padding-block: 8px;
     padding-inline: 16px;
     border-block-start: 1px solid ${cssVar.colorBorderSecondary};
+  `,
+  generatingStatus: css`
+    min-height: 36px;
+    padding-block: 6px;
+    color: ${cssVar.colorTextSecondary};
+  `,
+  generatingTextItem: css`
+    display: flex;
+    align-items: center;
+
+    height: 22px;
+
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 22px;
+    white-space: nowrap;
+  `,
+  generatingTextTrack: css`
+    animation: goal-generation-roll 16s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+
+    @media (prefers-reduced-motion: reduce) {
+      animation: none;
+    }
+
+    @keyframes goal-generation-roll {
+      0%,
+      20% {
+        transform: translateY(0);
+      }
+
+      25%,
+      45% {
+        transform: translateY(-22px);
+      }
+
+      50%,
+      70% {
+        transform: translateY(-44px);
+      }
+
+      75%,
+      95% {
+        transform: translateY(-66px);
+      }
+
+      100% {
+        transform: translateY(-88px);
+      }
+    }
+  `,
+  generatingTextViewport: css`
+    overflow: hidden;
+    height: 22px;
   `,
   head: css`
     position: relative;
@@ -98,70 +134,9 @@ const styles = createStaticStyles(({ css }) => ({
     padding-inline: 16px;
   `,
   inputShell: css`
-    position: relative;
-
     overflow: hidden;
-
     min-height: 208px;
-    border-block: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 8px;
-
     background: ${cssVar.colorBgElevated};
-  `,
-  inputShellLoading: css`
-    border-color: transparent;
-    background: ${cssVar.colorBgElevated};
-
-    &::after {
-      pointer-events: none;
-      content: '';
-
-      position: absolute;
-      z-index: 1;
-      inset: 0;
-
-      padding: 2px;
-      border-radius: inherit;
-
-      background: linear-gradient(
-        90deg,
-        ${cssVar.colorBorderSecondary} 0%,
-        ${cssVar.colorBorderSecondary} 16%,
-        #ff3d8d 30%,
-        #8b5cf6 40%,
-        #00c8ff 50%,
-        #22e6a8 60%,
-        #ffd43b 70%,
-        #ff6b35 80%,
-        ${cssVar.colorBorderSecondary} 92%,
-        ${cssVar.colorBorderSecondary} 100%
-      );
-      background-size: 300% 100%;
-
-      mask:
-        linear-gradient(#fff 0 0) content-box,
-        linear-gradient(#fff 0 0);
-
-      animation: goal-input-flow 1.2s linear infinite;
-
-      mask-composite: exclude;
-    }
-
-    @keyframes goal-input-flow {
-      from {
-        background-position: 0% 50%;
-      }
-
-      to {
-        background-position: 150% 50%;
-      }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      &::after {
-        animation: none;
-      }
-    }
   `,
   instructionEditor: css`
     min-height: 36px;
@@ -174,16 +149,6 @@ const styles = createStaticStyles(({ css }) => ({
     & > div > div > div {
       padding-block-end: 0 !important;
     }
-  `,
-  optional: css`
-    flex: none;
-    color: ${cssVar.colorTextSecondary};
-    background: ${cssVar.colorFillSecondary};
-  `,
-  required: css`
-    flex: none;
-    color: ${cssVar.colorInfo};
-    background: ${cssVar.colorInfoBg};
   `,
   reviewSection: css`
     padding-block: 16px;
@@ -222,12 +187,13 @@ const styles = createStaticStyles(({ css }) => ({
   `,
 }));
 
-const criterionRequirement = (drafts: GoalCriterionDraft[]) =>
-  drafts
-    .map((draft) => draft.title.trim())
-    .filter(Boolean)
-    .map((title) => `- ${title}`)
-    .join('\n');
+const GENERATION_ESTIMATE_SECONDS = 90;
+
+export const formatGoalGenerationRemainingTime = (seconds: number) => {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}:${rest.toString().padStart(2, '0')}`;
+};
 
 export interface CreateGoalContentProps {
   /** The agent that owns the goal. Goals are always agent-scoped. */
@@ -237,7 +203,8 @@ export interface CreateGoalContentProps {
   initialRequirement?: string;
   initialRoundBudget?: number;
   initialTitle?: string;
-  onCreated?: (goal: { agentId?: string; identifier: string }) => void;
+  onCreated?: (goal: { agentId?: string; goalId: string }) => void;
+  projectId?: string;
 }
 
 /**
@@ -249,14 +216,13 @@ export interface CreateGoalContentProps {
  * hardcoded), so this form asks for them outright.
  */
 const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
-  const { agentId, initialRequirement, initialRoundBudget, initialTitle, onCreated } = props;
+  const { agentId, initialRequirement, initialRoundBudget, initialTitle, onCreated, projectId } =
+    props;
   const { t } = useTranslation('chat');
   const { close } = useModalContext();
   const { allowed: canCreate, reason } = usePermission('create_content');
 
-  const createTask = useTaskStore((s) => s.createTask);
-  const isCreating = useTaskStore((s) => s.isCreatingTask);
-  const activeWorkspaceId = useActiveWorkspaceId();
+  const [isCreating, setIsCreating] = useState(false);
 
   const [step, setStep] = useState<'describe' | 'preparing' | 'review'>('describe');
   const [plan, setPlan] = useState<CreateGoalParams>({
@@ -266,27 +232,20 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
     maxTotalCost: null,
     name: initialTitle ?? '',
   });
-  // Default to private in workspace mode so sharing is opt-in; personal mode
-  // ignores the field and hides the chip.
-  const [visibility, setVisibility] = useState<'private' | 'public'>('private');
-
-  // A private agent can only run a private task, goals included.
-  const isPrivateAgent = useAgentVisibility(agentId) === 'private';
-  useEffect(() => {
-    if (isPrivateAgent && visibility === 'public') setVisibility('private');
-  }, [isPrivateAgent, visibility]);
+  const [remainingSeconds, setRemainingSeconds] = useState(GENERATION_ESTIMATE_SECONDS);
 
   const editor = useEditor();
-  const prepareTimerRef = useRef<ReturnType<typeof setTimeout>>(null);
-  useEffect(
-    () => () => {
-      if (prepareTimerRef.current) clearTimeout(prepareTimerRef.current);
-    },
-    [],
-  );
   const instructionRef = useRef(plan.instruction);
-  const assigneeMeta = useAgentDisplayMeta(agentId);
-  const requirement = useMemo(() => criterionRequirement(plan.criteria), [plan.criteria]);
+
+  useEffect(() => {
+    if (step !== 'preparing') return;
+    setRemainingSeconds(GENERATION_ESTIMATE_SECONDS);
+    const timer = window.setInterval(
+      () => setRemainingSeconds((value) => Math.max(0, value - 1)),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [step]);
 
   const handleContentChange = useCallback(() => {
     if (!canCreate || !editor) return;
@@ -298,30 +257,42 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
     pickAndInsertAttachments(editor);
   }, [editor]);
 
-  const handleNext = useCallback(() => {
+  const handleNext = useCallback(async () => {
     const instruction = instructionRef.current.trim() || plan.instruction.trim();
     if (!canCreate || !instruction) return;
-    const criterionTitle = deriveInitialGoalCriterionTitle(instruction, initialRequirement);
+    const name = plan.name.trim() || deriveGoalTitle(instruction);
     setPlan((current) => ({
       ...current,
-      criteria:
-        current.criteria.length > 0
-          ? current.criteria
-          : [
-              {
-                onFail: 'auto_repair',
-                required: true,
-                title: criterionTitle,
-                verifierType: 'agent',
-              },
-            ],
       instruction,
-      name: current.name.trim() || deriveGoalTitle(instruction),
+      name,
     }));
     instructionRef.current = instruction;
     setStep('preparing');
-    prepareTimerRef.current = setTimeout(() => setStep('review'), 1200);
-  }, [canCreate, initialRequirement, plan.instruction]);
+    try {
+      const generated = await generateGoalCriteria({
+        context: name ? `Goal: ${name}` : undefined,
+        goal: instruction,
+      });
+      instructionRef.current = generated.instruction;
+      setPlan((current) => ({
+        ...current,
+        criteria: generated.criteria,
+        instruction: generated.instruction,
+        name: generated.title,
+      }));
+      setStep('review');
+    } catch (error) {
+      console.error('[CreateGoalContent] generate failed:', error);
+      setPlan((current) => ({
+        ...current,
+        criteria: [createFallbackGoalCriterion(instruction)],
+        instruction,
+        name: instruction,
+      }));
+      setStep('review');
+      toast.warning(t('createGoal.generateFailed'));
+    }
+  }, [canCreate, plan.instruction, plan.name, t]);
 
   const handleCreateBlank = useCallback(() => {
     if (!canCreate) return;
@@ -360,9 +331,8 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
       isNew: true,
       onSubmit: (criterion) =>
         setPlan((current) => ({ ...current, criteria: [...current.criteria, criterion] })),
-      seq: plan.criteria.length + 1,
     });
-  }, [plan.criteria.length]);
+  }, []);
 
   const editCriterion = useCallback(
     (index: number) => {
@@ -371,7 +341,6 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
       openCriterionEditModal({
         criterion,
         onSubmit: (next) => updateCriterion(index, next),
-        seq: index + 1,
       });
     },
     [plan.criteria, updateCriterion],
@@ -381,59 +350,65 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
     if (!canCreate) return;
     const instruction =
       instructionRef.current.trim() || plan.instruction.trim() || plan.name.trim();
-    const editorData = instructionRef.current.trim()
-      ? (editor?.getDocument?.('json') as unknown)
-      : undefined;
     const reviewedCriteria = plan.criteria.filter((criterion) => criterion.title.trim());
     if (!instruction || reviewedCriteria.length === 0) return;
 
-    let verifyCriteriaIds: string[] = [];
+    const title = plan.name.trim() || instruction;
+    const budget = buildGoalCreateInput({
+      costBudget: plan.maxTotalCost,
+      instruction,
+    });
+
+    setIsCreating(true);
     try {
-      verifyCriteriaIds = await verifyService.createCriteria(reviewedCriteria);
-      const result = await createTask({
-        assigneeAgentId: agentId,
-        config: buildGoalTaskConfig({
-          costBudget: plan.maxTotalCost,
-          instruction,
-          requirement,
-          roundBudget: plan.maxIterations,
-          verifyCriteriaIds,
-        }),
-        editorData,
-        instruction,
-        name: plan.name.trim() || undefined,
-        visibility: activeWorkspaceId ? visibility : undefined,
+      const graph = await goalService.create({
+        agentId,
+        config: {
+          recovery: { maxAttemptsPerTask: resolveGoalAttemptBudget(plan.maxIterations) },
+        },
+        // `maxIterations` is the per-Task attempt budget above; it is not the
+        // graph-wide round cap, which counts runs across every Task and would
+        // strand the fourth task of a goal whose limit is three attempts.
+        // Structured criteria persist alongside the prose requirement: the goal
+        // page shows/edits them and the terminal acceptance is gated on them.
+        criteria: reviewedCriteria.map(({ description, instruction: how, title: name }) => ({
+          description,
+          instruction: how,
+          title: name,
+        })),
+        maxTotalCost: budget.maxTotalCost ?? undefined,
+        // No seed tasks: the coordinator plans the decomposition on first
+        // advance, turning a complex ask into several explorable directions.
+        ...buildReviewedGoalContent(instruction),
+        projectId,
+        title,
       });
-
-      if (!result) throw new Error('The goal was not created.');
-
+      // `goal.create` already queued the first advance server-side, but on a
+      // queue-less serverless deployment that kickoff is an in-process timer
+      // the host may freeze before firing. This request-bound advance is the
+      // durable fallback — fired and forgotten so the modal still closes
+      // immediately; the server dedupes a raced decomposition.
+      void goalService.advance(graph.goal.id).catch(() => {});
       close();
-      onCreated?.({
-        agentId: result.assigneeAgentId ?? undefined,
-        identifier: result.identifier,
-      });
+      onCreated?.({ agentId: graph.goal.agentId ?? undefined, goalId: graph.goal.id });
     } catch (error) {
       console.error('[CreateGoalContent] create failed:', error);
-      await Promise.allSettled(verifyCriteriaIds.map((id) => verifyService.deleteCriterion(id)));
       toast.error(t('createGoal.createFailed'));
+    } finally {
+      setIsCreating(false);
     }
-  }, [
-    activeWorkspaceId,
-    agentId,
-    canCreate,
-    close,
-    createTask,
-    editor,
-    onCreated,
-    plan,
-    requirement,
-    t,
-    visibility,
-  ]);
+  }, [agentId, canCreate, close, onCreated, plan, projectId, t]);
 
   const handlePrimaryAction =
     step === 'describe' ? handleNext : step === 'review' ? handleSubmit : undefined;
   const handleSubmitRef = useRef(handlePrimaryAction);
+  const generatingMessages = [
+    t('createGoal.generating'),
+    t('createGoal.generatingInstruction'),
+    t('createGoal.generatingCriteria'),
+    t('createGoal.generatingReview'),
+    t('createGoal.generating'),
+  ];
   useEffect(() => {
     handleSubmitRef.current = handlePrimaryAction;
   }, [handlePrimaryAction]);
@@ -476,9 +451,7 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
           )}
           {step !== 'review' && (
             <>
-              <div
-                className={`${styles.inputShell} ${step === 'preparing' ? styles.inputShellLoading : ''}`}
-              >
+              <GeneratingBorder className={styles.inputShell} generating={step === 'preparing'}>
                 <EditorCanvas
                   disabled={!canCreate || step === 'preparing'}
                   editor={editor}
@@ -489,8 +462,45 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
                   style={{ fontSize: 14, minHeight: 206, padding: 16 }}
                   onContentChange={handleContentChange}
                 />
-              </div>
-              <Text type={'secondary'}>{t('createGoal.describeHint')}</Text>
+              </GeneratingBorder>
+              {step === 'preparing' ? (
+                <Flexbox
+                  horizontal
+                  align={'center'}
+                  className={styles.generatingStatus}
+                  gap={10}
+                  justify={'space-between'}
+                >
+                  <Flexbox horizontal align={'center'} gap={8}>
+                    <NeuralNetworkLoading size={18} />
+                    <div
+                      aria-label={t('createGoal.generating')}
+                      className={styles.generatingTextViewport}
+                      role={'status'}
+                    >
+                      <div aria-hidden className={styles.generatingTextTrack}>
+                        {generatingMessages.map((message, index) => (
+                          <div
+                            className={`${styles.generatingTextItem} ${shinyTextStyles.shinyText}`}
+                            key={index}
+                          >
+                            {message}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </Flexbox>
+                  <Text fontSize={12} type={'secondary'}>
+                    {remainingSeconds > 0
+                      ? t('createGoal.generatingCountdown', {
+                          time: formatGoalGenerationRemainingTime(remainingSeconds),
+                        })
+                      : t('createGoal.generatingAlmostDone')}
+                  </Text>
+                </Flexbox>
+              ) : (
+                <Text type={'secondary'}>{t('createGoal.describeHint')}</Text>
+              )}
             </>
           )}
         </Flexbox>
@@ -529,57 +539,49 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
                 {t('createGoal.addCriterion')}
               </Button>
             </Flexbox>
-            <Flexbox className={styles.criteriaList}>
+            {/* Draft rows keep the C{seq} anchor but no status icon — the pending
+                circle belongs to the post-creation check list, not to authoring. */}
+            <CriterionList className={styles.criteriaList}>
               {plan.criteria.map((criterion, index) => (
-                <Flexbox
-                  horizontal
-                  align={'center'}
-                  className={styles.criterion}
-                  gap={8}
+                <CriterionRow
                   key={index}
-                  onClick={() => editCriterion(index)}
+                  seq={index + 1}
+                  title={criterion.title || t('createGoal.criterionPlaceholder')}
+                  actions={
+                    <>
+                      <ActionIcon
+                        icon={Pencil}
+                        size={'small'}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          editCriterion(index);
+                        }}
+                      />
+                      <ActionIcon
+                        icon={Trash2}
+                        size={'small'}
+                        title={t('createGoal.removeCriterion')}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          removeCriterion(index);
+                        }}
+                      />
+                    </>
+                  }
+                  onOpen={() => editCriterion(index)}
                 >
-                  <Icon color={cssVar.colorTextQuaternary} icon={CircleDashed} size={16} />
-                  <span className={styles.criterionIndex}>C{index + 1}</span>
-                  <Text ellipsis style={{ flex: 1, minWidth: 0 }}>
-                    {criterion.title || t('createGoal.criterionPlaceholder')}
-                  </Text>
-                  <Button
-                    className={(criterion.required ?? true) ? styles.required : styles.optional}
-                    size={'small'}
-                    type={'text'}
-                    onClick={(event) => {
-                      event.stopPropagation();
+                  <CriterionRequiredChip
+                    required={criterion.required ?? true}
+                    onToggle={() =>
                       updateCriterion(index, {
                         ...criterion,
                         required: !(criterion.required ?? true),
-                      });
-                    }}
-                  >
-                    {(criterion.required ?? true)
-                      ? t('verifyConfig.required')
-                      : t('verifyConfig.optional')}
-                  </Button>
-                  <ActionIcon
-                    icon={Pencil}
-                    size={'small'}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      editCriterion(index);
-                    }}
+                      })
+                    }
                   />
-                  <ActionIcon
-                    icon={Trash2}
-                    size={'small'}
-                    title={t('createGoal.removeCriterion')}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      removeCriterion(index);
-                    }}
-                  />
-                </Flexbox>
+                </CriterionRow>
               ))}
-            </Flexbox>
+            </CriterionList>
           </Flexbox>
 
           <Flexbox className={styles.reviewSection} gap={10}>
@@ -596,9 +598,13 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
                   min={2}
                   size={'small'}
                   style={{ width: '100%' }}
-                  suffix={t('createGoal.roundsUnit')}
                   value={plan.maxIterations ?? undefined}
                   variant={'filled'}
+                  suffix={
+                    <Text fontSize={12} type={'secondary'}>
+                      {t('createGoal.roundsUnit')}
+                    </Text>
+                  }
                   onChange={(value) => setPlan((current) => ({ ...current, maxIterations: value }))}
                 />
                 <Text className={styles.sectionHint} fontSize={12}>
@@ -615,11 +621,15 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
                   disabled={!canCreate}
                   min={0}
                   placeholder={t('createGoal.costBudgetPlaceholder')}
-                  prefix={'$'}
                   size={'small'}
                   style={{ width: '100%' }}
                   value={plan.maxTotalCost}
                   variant={'filled'}
+                  prefix={
+                    <Text fontSize={12} type={'secondary'}>
+                      $
+                    </Text>
+                  }
                   onChange={(value) => setPlan((current) => ({ ...current, maxTotalCost: value }))}
                 />
                 <Text className={styles.sectionHint} fontSize={12}>
@@ -633,21 +643,6 @@ const CreateGoalContent = memo<CreateGoalContentProps>((props) => {
 
       <Flexbox horizontal align={'center'} className={styles.footer} justify={'space-between'}>
         <Flexbox horizontal align={'center'} gap={8} wrap={'wrap'}>
-          <Flexbox horizontal align={'center'} gap={6}>
-            <AssigneeAvatar agentId={agentId} size={18} />
-            <Text fontSize={12}>{assigneeMeta?.title}</Text>
-          </Flexbox>
-          {activeWorkspaceId && (
-            <TaskVisibilityTag
-              visibility={visibility}
-              lockedReason={
-                isPrivateAgent ? t('createTask.visibility.privateAgentLocked') : undefined
-              }
-              onChange={setVisibility}
-            >
-              <TaskVisibilityChipLabel visibility={visibility} />
-            </TaskVisibilityTag>
-          )}
           {step === 'review' && (
             <ActionIcon
               icon={Paperclip}

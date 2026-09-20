@@ -13,12 +13,6 @@ vi.mock('react-router', () => ({
   useParams: () => ({ aid: 'agent-from-url' }),
 }));
 
-vi.mock('@lobehub/ui', () => ({
-  Flexbox: ({ children, ...props }: { children?: ReactNode; [key: string]: unknown }) => (
-    <div {...(props as Record<string, unknown>)}>{children}</div>
-  ),
-}));
-
 const pageEditorProps = vi.hoisted(() => ({
   current: undefined as undefined | Record<string, unknown>,
 }));
@@ -34,9 +28,9 @@ vi.mock('@/features/PageEditor', () => ({
   },
 }));
 
-vi.mock('@/features/WideScreenContainer', () => ({
+vi.mock('@/features/RightPanel', () => ({
   default: ({ children }: { children?: ReactNode }) => (
-    <div data-testid="wide-screen-container">{children}</div>
+    <aside data-testid="right-panel">{children}</aside>
   ),
 }));
 
@@ -158,7 +152,7 @@ describe('AgentDocumentPage', () => {
   it('renders FloatingChatPanel anchored on the URL agent + doc-scoped topic', () => {
     render(<AgentDocumentPage documentId="docs_abc" />);
 
-    const container = screen.getByTestId('wide-screen-container');
+    const container = screen.getByTestId('right-panel');
     const panel = screen.getByTestId('floating-chat-panel');
     expect(container).toContainElement(panel);
     expect(panelProps.current).toMatchObject({

@@ -158,10 +158,6 @@ export const UserLabSchema = z.object({
    */
   enableAgentGraphConfig: z.boolean().optional(),
   /**
-   * enable agent self-iteration feedback capture and policy execution
-   */
-  enableAgentSelfIteration: z.boolean().optional(),
-  /**
    * enable artifact deployment features (publish artifacts to a hosted URL)
    */
   enableArtifactDeployment: z.boolean().optional(),
@@ -190,10 +186,6 @@ export const UserLabSchema = z.object({
    */
   enableImessage: z.boolean().optional(),
   /**
-   * show the in-app Browser tab in the conversation WorkingSidebar (desktop only)
-   */
-  enableInAppBrowser: z.boolean().optional(),
-  /**
    * enable markdown rendering in chat input editor
    */
   enableInputMarkdown: z.boolean().optional(),
@@ -206,9 +198,24 @@ export const UserLabSchema = z.object({
    */
   enableOAuthApps: z.boolean().optional(),
   /**
+   * enable the project workspace experiment
+   */
+  enableProjects: z.boolean().optional(),
+  /**
+   * show the per-agent self-learning (expertise) page and its sidebar entry
+   */
+  enableSelfLearning: z.boolean().optional(),
+  /**
    * enable the task delivery-acceptance (verify) config UI on the task detail
    */
   enableTaskVerify: z.boolean().optional(),
+  /** Capture a conversation turn as an eval test case (developer-facing). */
+  enableEvalCapture: z.boolean().optional(),
+  /**
+   * route every agent run in this tab over one shared gateway WebSocket
+   * (protocol v2 mux) instead of one socket per run
+   */
+  enableGatewayMux: z.boolean().optional(),
   /**
    * enable the per-topic acceptance tray above the composer (author a topic's
    * delivery checklist inline)
@@ -226,6 +233,11 @@ export interface UserPreference {
    * @deprecated Use lab.enableInputMarkdown instead
    */
   disableInputMarkdownRender?: boolean;
+  /**
+   * CSS font-family value used as the global default UI font.
+   * Empty or whitespace-only values fall back to the application font stack.
+   */
+  fontFamily?: string;
   guide?: UserGuide;
   hideSyncAlert?: boolean;
   /**
@@ -319,6 +331,7 @@ export interface SSOProvider {
 export const UserPreferenceSchema = z
   .object({
     defaultOpenInApp: z.string().optional(),
+    fontFamily: z.string().optional(),
     guide: UserGuideSchema.optional(),
     hideSyncAlert: z.boolean().optional(),
     lab: UserLabSchema.optional(),

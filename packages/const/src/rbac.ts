@@ -62,6 +62,15 @@ export const PERMISSION_ACTIONS = {
 
   DOCUMENT_UPDATE: 'document:update',
 
+  // ==================== Document Comment Management ====================
+  DOCUMENT_COMMENT_CREATE: 'document_comment:create',
+
+  DOCUMENT_COMMENT_DELETE: 'document_comment:delete',
+
+  DOCUMENT_COMMENT_READ: 'document_comment:read',
+
+  DOCUMENT_COMMENT_UPDATE: 'document_comment:update',
+
   // ==================== File Management ====================
   FILE_DELETE: 'file:delete',
 
@@ -406,6 +415,10 @@ export const WORKSPACE_ROLE_PERMISSIONS: Record<WorkspaceSystemRoleName, readonl
     `${action('DOCUMENT_CREATE')}:all`,
     `${action('DOCUMENT_UPDATE')}:all`,
     `${action('DOCUMENT_DELETE')}:all`,
+    `${action('DOCUMENT_COMMENT_READ')}:all`,
+    `${action('DOCUMENT_COMMENT_CREATE')}:all`,
+    `${action('DOCUMENT_COMMENT_UPDATE')}:all`,
+    `${action('DOCUMENT_COMMENT_DELETE')}:all`,
     `${action('KNOWLEDGE_BASE_READ')}:all`,
     `${action('KNOWLEDGE_BASE_CREATE')}:all`,
     `${action('KNOWLEDGE_BASE_UPDATE')}:all`,
@@ -483,9 +496,18 @@ export const WORKSPACE_ROLE_PERMISSIONS: Record<WorkspaceSystemRoleName, readonl
     `${action('DOCUMENT_CREATE')}:owner`,
     `${action('DOCUMENT_UPDATE')}:owner`,
     `${action('DOCUMENT_DELETE')}:owner`,
+    `${action('DOCUMENT_COMMENT_READ')}:all`,
+    `${action('DOCUMENT_COMMENT_CREATE')}:owner`,
+    `${action('DOCUMENT_COMMENT_UPDATE')}:owner`,
+    `${action('DOCUMENT_COMMENT_DELETE')}:all`,
     `${action('KNOWLEDGE_BASE_READ')}:all`,
     `${action('KNOWLEDGE_BASE_CREATE')}:owner`,
-    `${action('KNOWLEDGE_BASE_UPDATE')}:owner`,
+    // `:all` marks admins as knowledge-base curators: it powers the
+    // resource-permission manage/browse bypass (restricted KBs stay visible to
+    // them). Row-level mutations are still creator/owner-gated by
+    // `assertWorkspaceRowManageable`, so this does not let admins edit other
+    // members' knowledge bases.
+    `${action('KNOWLEDGE_BASE_UPDATE')}:all`,
     `${action('KNOWLEDGE_BASE_DELETE')}:owner`,
     // Shared workspace configuration
     `${action('AI_MODEL_READ')}:all`,
@@ -541,6 +563,10 @@ export const WORKSPACE_ROLE_PERMISSIONS: Record<WorkspaceSystemRoleName, readonl
     `${action('DOCUMENT_CREATE')}:owner`,
     `${action('DOCUMENT_UPDATE')}:owner`,
     `${action('DOCUMENT_DELETE')}:owner`,
+    `${action('DOCUMENT_COMMENT_READ')}:all`,
+    `${action('DOCUMENT_COMMENT_CREATE')}:owner`,
+    `${action('DOCUMENT_COMMENT_UPDATE')}:owner`,
+    `${action('DOCUMENT_COMMENT_DELETE')}:owner`,
     `${action('KNOWLEDGE_BASE_READ')}:all`,
     `${action('KNOWLEDGE_BASE_CREATE')}:owner`,
     `${action('KNOWLEDGE_BASE_UPDATE')}:owner`,
@@ -548,6 +574,11 @@ export const WORKSPACE_ROLE_PERMISSIONS: Record<WorkspaceSystemRoleName, readonl
     `${action('AI_MODEL_READ')}:all`,
     `${action('AI_MODEL_INVOKE')}:all`,
     `${action('AI_PROVIDER_READ')}:all`,
+    // API keys — members manage only the credentials they issued themselves.
+    `${action('API_KEY_READ')}:owner`,
+    `${action('API_KEY_CREATE')}:owner`,
+    `${action('API_KEY_UPDATE')}:owner`,
+    `${action('API_KEY_DELETE')}:owner`,
   ],
   [WORKSPACE_SYSTEM_ROLES.VIEWER]: [
     // Read-only across the board
@@ -562,6 +593,7 @@ export const WORKSPACE_ROLE_PERMISSIONS: Record<WorkspaceSystemRoleName, readonl
     `${action('TOPIC_COMMENT_READ')}:all`,
     `${action('FILE_READ')}:all`,
     `${action('DOCUMENT_READ')}:all`,
+    `${action('DOCUMENT_COMMENT_READ')}:all`,
     `${action('KNOWLEDGE_BASE_READ')}:all`,
     `${action('AI_MODEL_READ')}:all`,
     `${action('AI_PROVIDER_READ')}:all`,
@@ -619,11 +651,23 @@ export const getWorkspaceRolePermissionCodes = (role: string): readonly string[]
   return systemRole ? WORKSPACE_ROLE_PERMISSIONS[systemRole] : [];
 };
 
+export const TASK_ASSIGNEE_PERMISSION_CODES = [
+  `${action('AGENT_UPDATE')}:all`,
+  `${action('AGENT_UPDATE')}:owner`,
+] as const;
+
+/** Whether a built-in workspace role can mutate and run assigned tasks. */
+export const canWorkspaceRoleBeTaskAssignee = (role?: string | null): boolean => {
+  if (!role) return false;
+  const permissions = getWorkspaceRolePermissionCodes(role);
+  return TASK_ASSIGNEE_PERMISSION_CODES.some((code) => permissions.includes(code));
+};
+
 /**
  * Default permission codes every authenticated user holds over their OWN data
  * in personal (non-workspace) context.
  *
- * Why this exists (LOBE-12892): ordinary accounts have no `rbac_user_roles`
+ * Why this exists: ordinary accounts have no `rbac_user_roles`
  * rows — roles are only assigned via the admin backend — so any personal-mode
  * check that consulted the DB alone returned 403 for every registered user,
  * making the OpenAPI surface admin-only in practice. Personal data is already
@@ -687,6 +731,10 @@ export const PERSONAL_DEFAULT_PERMISSIONS: readonly string[] = [
   `${action('DOCUMENT_CREATE')}:owner`,
   `${action('DOCUMENT_UPDATE')}:owner`,
   `${action('DOCUMENT_DELETE')}:owner`,
+  `${action('DOCUMENT_COMMENT_READ')}:owner`,
+  `${action('DOCUMENT_COMMENT_CREATE')}:owner`,
+  `${action('DOCUMENT_COMMENT_UPDATE')}:owner`,
+  `${action('DOCUMENT_COMMENT_DELETE')}:owner`,
   `${action('KNOWLEDGE_BASE_READ')}:owner`,
   `${action('KNOWLEDGE_BASE_CREATE')}:owner`,
   `${action('KNOWLEDGE_BASE_UPDATE')}:owner`,

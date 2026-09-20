@@ -1,8 +1,8 @@
 'use client';
 
 import { agentDisplayName } from '@lobechat/types';
-import { ActionIcon, Flexbox, Text } from '@lobehub/ui';
-import { DropdownMenu } from '@lobehub/ui/base-ui';
+import { Flexbox } from '@lobehub/ui';
+import { ActionIcon, DropdownMenu, Text } from '@lobehub/ui/base-ui';
 import { cssVar, cx } from 'antd-style';
 import { MoreHorizontal } from 'lucide-react';
 import { memo } from 'react';
@@ -70,6 +70,14 @@ const Header = memo<HeaderProps>(
             >
               {resolvedTitle}
             </Text>
+            <DropdownMenu
+              iconSpaceMode={'group'}
+              items={menuItems}
+              placement={'bottomLeft'}
+              popupProps={{ style: { minWidth: 200 } }}
+            >
+              <ActionIcon icon={MoreHorizontal} size={DESKTOP_HEADER_ICON_SMALL_SIZE} />
+            </DropdownMenu>
           </Flexbox>
         }
         right={
@@ -77,14 +85,6 @@ const Header = memo<HeaderProps>(
             {documentId && <AutoSaveHint documentId={documentId} />}
             {documentId && <ShareButton documentId={documentId} />}
             <ToggleRightPanelButton hideWhenExpanded />
-            <DropdownMenu
-              iconSpaceMode={'group'}
-              items={menuItems}
-              placement={'bottomRight'}
-              popupProps={{ style: { minWidth: 200 } }}
-            >
-              <ActionIcon icon={MoreHorizontal} size={DESKTOP_HEADER_ICON_SMALL_SIZE} />
-            </DropdownMenu>
           </Flexbox>
         }
       />

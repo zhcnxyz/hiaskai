@@ -1,6 +1,8 @@
 import { MemorySourceType } from '@lobechat/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createStepRunner } from '@/server/workflows/testing/stepContext';
+
 import { processTopicsHandler } from '../processTopics';
 
 const mocks = vi.hoisted(() => ({
@@ -11,16 +13,18 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@lobechat/observability-otel/modules/upstash-workflow', () => ({
-  buildUpstashWorkflowMetricAttributes: vi.fn(() => ({})),
+  buildUpstashWorkflowMetricAttributes: vi.fn(function () {
+    return {};
+  }),
   tracer: {
-    startActiveSpan: vi.fn((_name: string, callback: (span: unknown) => unknown) =>
-      callback({
+    startActiveSpan: vi.fn(function (_name: string, callback: (span: unknown) => unknown) {
+      return callback({
         end: vi.fn(),
         recordException: vi.fn(),
         setAttributes: vi.fn(),
         setStatus: vi.fn(),
-      }),
-    ),
+      });
+    }),
   },
 }));
 
@@ -50,11 +54,13 @@ vi.mock('@/server/services/memory/userMemory/extract', () => ({
 }));
 
 vi.mock('@/database/models/asyncTask', () => ({
-  AsyncTaskModel: vi.fn(() => ({
-    appendUserMemoryWorkflowRunIds: mocks.appendUserMemoryWorkflowRunIds,
-    isHourlyMemoryExtractionCancellationRequested:
-      mocks.isHourlyMemoryExtractionCancellationRequested,
-  })),
+  AsyncTaskModel: vi.fn(function () {
+    return {
+      appendUserMemoryWorkflowRunIds: mocks.appendUserMemoryWorkflowRunIds,
+      isHourlyMemoryExtractionCancellationRequested:
+        mocks.isHourlyMemoryExtractionCancellationRequested,
+    };
+  }),
 }));
 
 vi.mock('@/database/server', () => ({
@@ -74,7 +80,7 @@ vi.mock('../runGuard', () => ({
 
 const createContext = (requestPayload: Record<string, unknown>) => ({
   requestPayload,
-  run: vi.fn((_name: string, callback: () => unknown) => callback()),
+  run: createStepRunner(),
 });
 
 describe('processTopicsHandler hourly task behavior', () => {

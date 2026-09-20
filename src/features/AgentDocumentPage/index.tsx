@@ -4,11 +4,13 @@ import { Flexbox } from '@lobehub/ui';
 import { memo, useCallback, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router';
 
+import AsyncError from '@/components/AsyncError';
+import { RouteLoading } from '@/components/Skeleton/RouteSegment';
 import { type ComposerTarget, createComposerTarget } from '@/features/Conversation/types';
 import FloatingChatPanel from '@/features/FloatingChatPanel';
 import { useDocumentChatTopic } from '@/features/FloatingChatPanel/useDocumentChatTopic';
 import { PageEditor } from '@/features/PageEditor';
-import WideScreenContainer from '@/features/WideScreenContainer';
+import RightPanel from '@/features/RightPanel';
 import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
 import { messageMapKey } from '@/store/chat/utils/messageMapKey';
 
@@ -34,6 +36,7 @@ const AgentDocumentPage = memo<AgentDocumentPageProps>(({ documentId }) => {
   const navigate = useWorkspaceAwareNavigate();
   const {
     error: itemError,
+    isLoading,
     isNotFound,
     item,
     mutate,
@@ -117,8 +120,18 @@ const AgentDocumentPage = memo<AgentDocumentPageProps>(({ documentId }) => {
   // a 404 for a doc that simply moved to the empty-state landing.
   if (isNotFound) return null;
 
+  if (isLoading) return <RouteLoading />;
+  if (itemError && !item)
+    return <AsyncError error={itemError} variant={'page'} onRetry={() => void mutate()} />;
+
   return (
-    <Flexbox flex={1} height={'100%'} style={{ minHeight: 0, overflow: 'hidden' }} width={'100%'}>
+    <Flexbox
+      horizontal
+      flex={1}
+      height={'100%'}
+      style={{ minHeight: 0, overflow: 'hidden' }}
+      width={'100%'}
+    >
       <Flexbox flex={1} style={{ minHeight: 0 }} width={'100%'}>
         <PageEditor
           fullWidthHeader
@@ -140,15 +153,18 @@ const AgentDocumentPage = memo<AgentDocumentPageProps>(({ documentId }) => {
         />
       </Flexbox>
       {chatAgentId && docChatTopicId && (
-        <WideScreenContainer>
-          <FloatingChatPanel
-            agentDocumentId={item?.id}
-            agentId={chatAgentId}
-            documentId={documentId}
-            key={`${chatAgentId}:${docChatTopicId}:${documentId}`}
-            topicId={docChatTopicId}
-          />
-        </WideScreenContainer>
+        <RightPanel expand defaultWidth={400} maxWidth={720} minWidth={320}>
+          <Flexbox flex={1} height={'100%'} justify={'flex-end'} style={{ minHeight: 0 }}>
+            <FloatingChatPanel
+              agentDocumentId={item?.id}
+              agentId={chatAgentId}
+              documentId={documentId}
+              key={`${chatAgentId}:${docChatTopicId}:${documentId}`}
+              mode="embedded"
+              topicId={docChatTopicId}
+            />
+          </Flexbox>
+        </RightPanel>
       )}
     </Flexbox>
   );

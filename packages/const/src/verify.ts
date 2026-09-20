@@ -59,6 +59,7 @@ export type VerifyUserDecision = (typeof verifyUserDecisions)[number];
 export const verifyRunStatuses = [
   'unverified',
   'planned',
+  'collecting_evidence',
   'verifying',
   'passed',
   'failed',
@@ -69,6 +70,28 @@ export const verifyRunStatuses = [
   'delivered',
 ] as const;
 export type VerifyRunStatus = (typeof verifyRunStatuses)[number];
+
+/**
+ * A draft round only describes what will be verified: nothing has executed and
+ * nobody has decided. Drafts follow the live plan and are reused by the next
+ * plan or ingest instead of consuming another round number.
+ *
+ * A replay is excluded: it is pinned to the source round's frozen definition, so
+ * it must not follow later graph edits or absorb another flow. Only the newest
+ * round can be the open draft — an older one left behind by a replay is an
+ * abandoned ledger position, so callers check the latest round rather than
+ * searching the whole chain.
+ */
+export const isDraftVerifyRun = (run: {
+  metadata?: { replayOfRunId?: string } | null;
+  planConfirmedAt?: Date | string | null;
+  status?: string | null;
+  userDecision?: string | null;
+}): boolean =>
+  run.status === 'planned' &&
+  !run.planConfirmedAt &&
+  !run.userDecision &&
+  !run.metadata?.replayOfRunId;
 
 /**
  * What produced a verification session.
@@ -163,6 +186,14 @@ const PROGRAMMATIC_TEST_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Stored title of the synthesized holistic fallback check (one broad agent
+ * verify over the whole deliverable, used when a task opted into verify without
+ * decomposing into criteria). The server persists this fixed English string;
+ * clients match against it to render a localized display title instead.
+ */
+export const HOLISTIC_CHECK_TITLE = 'Task delivery acceptance';
+
+/**
  * Whether a proposed acceptance check is really one of the repo's programmatic
  * test / static-analysis gates rather than a delivery outcome a person accepts.
  *
@@ -234,6 +265,83 @@ export type AcceptanceStatus = (typeof acceptanceStatuses)[number];
 export const acceptanceCheckReviewActions = ['accept', 'ignore', 'reject'] as const;
 export type AcceptanceCheckReviewAction = (typeof acceptanceCheckReviewActions)[number];
 
+/**
+ * Why a reviewer rejected a check. The offline baseline found that
+ * three different models converged on the same "wrong" answer for 24 of the
+ * checks a human had rejected — because the reject button is the only outbound
+ * channel on the page, so it carries three unrelated jobs at once. Only `unmet`
+ * is learnable from the check spec; the other two are a different question
+ * entirely, and folding them into one label caps how good any reviewer (human
+ * or model) can look.
+ *
+ * - unmet:       the delivery does not satisfy THIS check
+ * - new-idea:    the check passes, but the reviewer wants something different
+ * - no-evidence: the evidence does not show enough to judge the check at all
+ */
+export const acceptanceRejectIntents = ['unmet', 'new-idea', 'no-evidence'] as const;
+export type AcceptanceRejectIntent = (typeof acceptanceRejectIntents)[number];
+
+/** What an automated reviewer proposes for a check. Deliberately narrower than
+ *  the human's vocabulary: a model never proposes `ignore`, which is a statement
+ *  about the reviewer's priorities rather than about the delivery.
+ *
+ *  `unjudgeable` is NOT a softer `reject`. It means the criterion asks for
+ *  something no reader can confirm — re-running the delivered scripts, building,
+ *  driving a live system — so no capture could ever settle it and another
+ *  delivery attempt is wasted. Thin or missing evidence stays a `reject`,
+ *  because a builder can fix that. The two are separate values because folding
+ *  them together made "the delivery fell short" and "this reviewer cannot decide"
+ *  indistinguishable in the agreement statistics. */
+export const reviewPredictionActions = ['accept', 'reject', 'unjudgeable'] as const;
+export type ReviewPredictionAction = (typeof reviewPredictionActions)[number];
+
+/**
+ * How a review attempt ended. Split from the verdict for the same reason
+ * `verify_check_results` splits `status` from `verdict`: an attempt can finish
+ * without producing a judgement at all, and "no judgement" must be recorded
+ * rather than inferred from a missing row.
+ *
+ * Without this, four different situations collapse into "no row" — the model
+ * passed the check, it had no frame to look at, the call failed, or nobody ever
+ * asked. Only the first is the model's opinion, so miss rate (the metric this
+ * whole feature exists to move) has no denominator. A silent provider outage
+ * also becomes indistinguishable from "the model approved everything".
+ *
+ * - judged:  the model returned a verdict; `action` is set
+ * - skipped: nothing judgeable (no screenshot/GIF evidence); `action` is null
+ * - errored: the call failed or its output did not parse; `action` is null
+ */
+export const reviewPredictionStatuses = ['judged', 'skipped', 'errored'] as const;
+export type ReviewPredictionStatus = (typeof reviewPredictionStatuses)[number];
+
+/**
+ * The reviewer's verdict on a model proposal. Three-way on purpose — a flat
+ * accept/dismiss would merge two opposite training signals: "you saw a problem
+ * that isn't there" (the judgement was wrong) and "there IS a problem but you
+ * circled the wrong thing" (the judgement was RIGHT, the grounding was wrong).
+ *
+ * - confirmed:    the proposal was right; it becomes a real reject
+ * - not-an-issue: no problem here — negative signal on the judgement
+ * - misidentified: a real problem, wrong region or wrong description —
+ *   positive signal on the judgement, negative on the grounding
+ */
+export const reviewAdjudications = ['confirmed', 'not-an-issue', 'misidentified'] as const;
+export type ReviewAdjudication = (typeof reviewAdjudications)[number];
+
+/**
+ * How closely the reviewer's submitted reject matched the proposal it started
+ * from. Derived by diffing the proposal against what was actually submitted, so
+ * it costs the reviewer no extra clicks — they were writing the reject anyway.
+ * Each value isolates which part of the proposal was wrong.
+ */
+export const reviewProposalEdits = [
+  'verbatim',
+  'comment-edited',
+  'region-moved',
+  'rewritten',
+] as const;
+export type ReviewProposalEdit = (typeof reviewProposalEdits)[number];
+
 /** The medium of a captured evidence artifact. */
 export const verifyEvidenceTypes = [
   'screenshot',
@@ -254,6 +362,7 @@ export type VerifyEvidenceType = (typeof verifyEvidenceTypes)[number];
 
 /** Who / what captured an evidence artifact (provenance). */
 export const verifyEvidenceCapturedBy = [
+  'agent',
   'agent-browser',
   'cdp',
   'cli',
@@ -275,7 +384,7 @@ export const DEFAULT_MAX_REPAIR_ROUNDS = 3;
  * (`tasks.config.verify.maxIterations`). Their product is the worst-case number
  * of agent runs a goal can pay for.
  */
-export const DEFAULT_GOAL_MAX_ROUNDS = 3;
+export const DEFAULT_GOAL_MAX_ROUNDS = 8;
 
 /** Bounds the round budget a goal may be created with. */
 export const GOAL_MAX_ROUNDS_RANGE = { max: 10, min: 2 } as const;
@@ -294,3 +403,37 @@ export interface VerifyRunOrigin {
   /** The topic to reopen to continue from this report. */
   topicId?: string;
 }
+
+/**
+ * GOMS-KLM interaction cost — the standard model for pricing a verification
+ * round's *user-equivalent* interaction cost.
+ *
+ * The seam is deliberate: a UI driver (the acceptance skill's agent-browser
+ * wrapper) only emits raw **operator counts** per action into a JSONL trace; the
+ * platform turns counts into seconds with the timing model below. Keeping the
+ * timing here rather than in the driver means every report is priced by one
+ * model, and any published `interactionCost` can be recomputed from its trace.
+ */
+export const GOMS_KLM_MODEL = 'goms-klm@lobe-v1';
+
+/** Schema tag every trace atom carries; a foreign tag is not summed. */
+export const GOMS_KLM_TRACE_SCHEMA = 'lobehub.agentBrowserKlmTrace@1';
+
+/**
+ * Conventional trace filename inside a report directory. `acceptance run ingest`
+ * picks it up automatically — absent means the round simply has no interaction
+ * cost (a CLI-only run, or a machine without agent-browser), never an error.
+ */
+export const GOMS_KLM_TRACE_FILE = 'interaction-trace.jsonl';
+
+/**
+ * Seconds per KLM operator (Card, Moran & Newell), tuned for pointer-driven web
+ * UI. `T_char` prices one typed character; `R_ms` is measured wait, not modeled.
+ */
+export const GOMS_KLM_TIMING_SECONDS = {
+  H: 0.4,
+  K: 0.2,
+  M: 1.35,
+  P: 1.1,
+  T_char: 0.2,
+} as const;

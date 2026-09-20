@@ -1,18 +1,22 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import { SWRConfig } from 'swr';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type ApiKeyItem, type CreateApiKeyParams } from '@/types/apiKey';
 
+import { WorkspaceApiKeyPolicyContext } from '../WorkspaceApiKeyPolicyContext';
 import ApiKey from './ApiKey';
+import ScopeSelector from './ApiKeyModal/ScopeSelector';
 
 const hoisted = vi.hoisted(() => ({
+  confirmModal: vi.fn((opts: { onOk?: () => void }) => opts.onOk?.()),
   createApiKeyModal: vi.fn(),
   state: {
     activeWorkspaceId: null as string | null,
     allowed: true,
+    canCreateWorkspaceKey: true,
+    isWorkspaceAdmin: true,
     manageSettingsAllowed: true,
     reason: '',
   },
@@ -25,56 +29,28 @@ const hoisted = vi.hoisted(() => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }));
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+vi.mock('@lobehub/ui/base-ui', async (importOriginal) => ({
+  ...((await importOriginal()) as Record<string, unknown>),
+  // Menu items surface as plain buttons so row actions are reachable in jsdom.
+  DropdownMenu: ({
+    children,
+    items,
+  }: {
+    children?: React.ReactNode;
+    items: { disabled?: boolean; key: string; label: string; onClick?: () => void }[];
+  }) => (
+    <span>
+      {children}
+      {items.map((item) => (
+        <button disabled={item.disabled} key={item.key} type="button" onClick={item.onClick}>
+          {item.label}
+        </button>
+      ))}
+    </span>
+  ),
+  confirmModal: hoisted.confirmModal,
+  toast: hoisted.toast,
 }));
-
-vi.mock('@lobehub/ui/base-ui', () => {
-  return {
-    Button: ({ children, ...props }: ButtonHTMLAttributes<HTMLButtonElement>) => (
-      <button {...props}>{children}</button>
-    ),
-    Drawer: ({
-      children,
-      onClose,
-      open,
-      title,
-    }: {
-      children?: ReactNode;
-      onClose?: () => void;
-      open?: boolean;
-      title?: ReactNode;
-    }) =>
-      open ? (
-        <div role="dialog">
-          <div>{title}</div>
-          <button type="button" onClick={onClose}>
-            close-drawer
-          </button>
-          {children}
-        </div>
-      ) : null,
-    Switch: ({
-      checked,
-      disabled,
-      onChange,
-    }: {
-      checked?: boolean;
-      disabled?: boolean;
-      onChange?: (checked: boolean) => void;
-      children?: ReactNode;
-    }) => (
-      <input
-        checked={checked}
-        disabled={disabled}
-        role="switch"
-        type="checkbox"
-        onChange={(event) => onChange?.(event.currentTarget.checked)}
-      />
-    ),
-    toast: hoisted.toast,
-  };
-});
 
 vi.mock('@/business/client/hooks/useActiveWorkspaceId', () => ({
   getActiveWorkspaceId: () => hoisted.state.activeWorkspaceId,
@@ -147,7 +123,15 @@ const renderPage = () => {
   return render(
     <SWRConfig value={{ dedupingInterval: 0, provider: () => new Map() }}>
       <QueryClientProvider client={queryClient}>
-        <ApiKey />
+        <WorkspaceApiKeyPolicyContext
+          value={{
+            canCreate: hoisted.state.canCreateWorkspaceKey,
+            isAdmin: hoisted.state.isWorkspaceAdmin,
+            memberCreation: hoisted.state.canCreateWorkspaceKey ? 'all_members' : 'admins_only',
+          }}
+        >
+          <ApiKey />
+        </WorkspaceApiKeyPolicyContext>
       </QueryClientProvider>
     </SWRConfig>,
   );
@@ -157,6 +141,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   hoisted.state.activeWorkspaceId = null;
   hoisted.state.allowed = true;
+  hoisted.state.canCreateWorkspaceKey = true;
+  hoisted.state.isWorkspaceAdmin = true;
   hoisted.state.manageSettingsAllowed = true;
   hoisted.state.reason = '';
   hoisted.trpc.getApiKeys.mockResolvedValue([makeItem()]);
@@ -171,6 +157,26 @@ const openDetail = async (name: string) => {
 };
 
 describe('ApiKey', () => {
+  it('offers MCP read/write and read-only usage scopes when access is restricted', () => {
+    const onSelectedChange = vi.fn();
+    render(
+      <ScopeSelector
+        fullAccess={false}
+        selected={[]}
+        onFullAccessChange={vi.fn()}
+        onSelectedChange={onSelectedChange}
+      />,
+    );
+
+    const mcpGroup = screen.getByText('apikey.scopes.groups.mcp').parentElement!;
+    const usageGroup = screen.getByText('apikey.scopes.groups.usage').parentElement!;
+    expect(within(mcpGroup).getAllByRole('checkbox')).toHaveLength(2);
+    expect(within(usageGroup).getAllByRole('checkbox')).toHaveLength(1);
+
+    fireEvent.click(within(mcpGroup).getByRole('checkbox', { name: 'apikey.scopes.write' }));
+    expect(onSelectedChange).toHaveBeenCalledWith(['mcp:write', 'mcp:read']);
+  });
+
   it('shows loading, then empty state when the first fetch returns no keys', async () => {
     let resolveList!: (items: ApiKeyItem[]) => void;
     hoisted.trpc.getApiKeys.mockImplementation(
@@ -188,6 +194,20 @@ describe('ApiKey', () => {
     resolveList([]);
 
     expect(await screen.findByText('apikey.list.empty')).toBeInTheDocument();
+  });
+
+  it('explains the creation restriction when a workspace member has no keys', async () => {
+    hoisted.state.activeWorkspaceId = 'ws-1';
+    hoisted.state.canCreateWorkspaceKey = false;
+    hoisted.state.isWorkspaceAdmin = false;
+    hoisted.trpc.getApiKeys.mockResolvedValue([]);
+
+    renderPage();
+
+    expect(await screen.findByText('apikey.list.restrictedEmpty.title')).toBeInTheDocument();
+    expect(screen.getByText('apikey.list.restrictedEmpty.desc')).toBeInTheDocument();
+    expect(screen.queryByText('apikey.list.empty')).toBeNull();
+    expect(screen.getByRole('button', { name: 'apikey.list.actions.create' })).toBeDisabled();
   });
 
   it('renders fetched keys with their plaintext for the owner', async () => {
@@ -272,7 +292,11 @@ describe('ApiKey', () => {
     const dialog = await openDetail('My Key');
     fireEvent.click(within(dialog).getByRole('switch'));
 
-    await waitFor(() => expect(hoisted.toast.error).toHaveBeenCalledWith('manageOnlyCreator'));
+    await waitFor(() =>
+      expect(hoisted.toast.error).toHaveBeenCalledWith(
+        'Only the creator or a workspace owner can do this',
+      ),
+    );
     expect(hoisted.trpc.getApiKeys).toHaveBeenCalledTimes(1);
   });
 
@@ -284,7 +308,9 @@ describe('ApiKey', () => {
     const dialog = await openDetail('My Key');
     fireEvent.click(within(dialog).getByRole('switch'));
 
-    await waitFor(() => expect(hoisted.toast.error).toHaveBeenCalledWith('operationFailed'));
+    await waitFor(() =>
+      expect(hoisted.toast.error).toHaveBeenCalledWith('Operation failed, please try again'),
+    );
     expect(hoisted.trpc.getApiKeys).toHaveBeenCalledTimes(1);
   });
 
@@ -296,6 +322,10 @@ describe('ApiKey', () => {
 
     expect(screen.getByRole('button', { name: 'apikey.list.actions.create' })).toBeDisabled();
 
+    // the row menu's destructive action is gated too
+    const row = screen.getByText('My Key').closest('tr')!;
+    expect(within(row).getByRole('button', { name: 'apikey.list.actions.delete' })).toBeDisabled();
+
     // the drawer carries the whole management surface, so it must be gated
     const dialog = await openDetail('My Key');
     expect(within(dialog).getByRole('button', { name: 'edit-text' })).toBeDisabled();
@@ -306,7 +336,7 @@ describe('ApiKey', () => {
     ).toBeDisabled();
   });
 
-  it('allows a workspace admin to manage another member key while keeping its secret masked', async () => {
+  it('allows a workspace admin to revoke another member key while keeping it read-only and masked', async () => {
     hoisted.state.activeWorkspaceId = 'ws-1';
     hoisted.trpc.getApiKeys.mockResolvedValue([
       makeItem(),
@@ -317,11 +347,19 @@ describe('ApiKey', () => {
 
     const otherRow = screen.getByText('Other Key').closest('tr')!;
     expect(within(otherRow).getByText(`sk-lh-${'*'.repeat(12)}`)).toBeInTheDocument();
+    // central revocation is one row-menu click away for an admin
+    expect(
+      within(otherRow).getByRole('button', { name: 'apikey.list.actions.delete' }),
+    ).toBeEnabled();
 
-    // an admin can manage another member's key from its drawer
+    // an admin can centrally revoke another member's key, but only its creator
+    // can rename, disable, or edit the grants.
     const dialog = await openDetail('Other Key');
-    expect(within(dialog).getByRole('button', { name: 'edit-text' })).toBeEnabled();
-    expect(within(dialog).getByRole('switch')).toBeEnabled();
+    expect(within(dialog).getByRole('button', { name: 'edit-text' })).toBeDisabled();
+    expect(within(dialog).getByRole('switch')).toBeDisabled();
+    expect(
+      within(dialog).queryByRole('button', { name: 'apikey.detail.permissions.edit' }),
+    ).toBeNull();
     expect(
       within(dialog).getByRole('button', { name: 'apikey.list.actions.delete' }),
     ).toBeEnabled();
@@ -332,20 +370,33 @@ describe('ApiKey', () => {
     expect(within(mineRow).getByText('lb-plain-secret')).toBeInTheDocument();
   });
 
-  it('disables create and row actions for workspace members without settings permission', async () => {
+  it('allows workspace members to create and manage their own keys', async () => {
     hoisted.state.activeWorkspaceId = 'ws-1';
     hoisted.state.manageSettingsAllowed = false;
+    hoisted.state.isWorkspaceAdmin = false;
     renderPage();
     await screen.findByText('My Key');
 
-    expect(screen.getByRole('button', { name: 'apikey.list.actions.create' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'apikey.list.actions.create' })).toBeEnabled();
 
     const dialog = await openDetail('My Key');
-    expect(within(dialog).getByRole('button', { name: 'edit-text' })).toBeDisabled();
-    expect(within(dialog).getByRole('switch')).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'edit-text' })).toBeEnabled();
+    expect(within(dialog).getByRole('switch')).toBeEnabled();
     expect(
       within(dialog).getByRole('button', { name: 'apikey.list.actions.delete' }),
-    ).toBeDisabled();
+    ).toBeEnabled();
+  });
+
+  it('disables member creation when the workspace policy is admins only', async () => {
+    hoisted.state.activeWorkspaceId = 'ws-1';
+    hoisted.state.canCreateWorkspaceKey = false;
+    hoisted.state.isWorkspaceAdmin = false;
+    renderPage();
+    await screen.findByText('My Key');
+
+    const createButton = screen.getByRole('button', { name: 'apikey.list.actions.create' });
+    expect(createButton).toBeDisabled();
+    expect(createButton).toHaveAttribute('title', 'apikey.list.actions.creationRestricted');
   });
 
   it('shows the unavailable copy with tooltip when key decryption failed', async () => {
@@ -369,6 +420,15 @@ describe('ApiKey', () => {
     expect(screen.getByText('Bob')).toBeInTheDocument();
   });
 
+  it('hides the creator column from workspace members', async () => {
+    hoisted.state.activeWorkspaceId = 'ws-1';
+    hoisted.state.isWorkspaceAdmin = false;
+    renderPage();
+    await screen.findByText('My Key');
+
+    expect(screen.queryByRole('columnheader', { name: 'apikey.list.columns.creator' })).toBeNull();
+  });
+
   it('hides the creator column in personal mode', async () => {
     renderPage();
     await screen.findByText('My Key');
@@ -376,20 +436,50 @@ describe('ApiKey', () => {
     expect(screen.queryByRole('columnheader', { name: 'apikey.list.columns.creator' })).toBeNull();
   });
 
-  it('keeps scopes out of the list — they live in the detail drawer', async () => {
-    hoisted.trpc.getApiKeys.mockResolvedValue([makeItem({ scopes: ['agent:read'] })]);
+  it('summarises scopes as a compact tag — the full grant list stays in the drawer', async () => {
+    hoisted.trpc.getApiKeys.mockResolvedValue([
+      makeItem({ scopes: ['agent:read', 'mcp:read'] }),
+      makeItem({ id: 'key-2', name: 'Full Key' }),
+    ]);
     renderPage();
     await screen.findByText('My Key');
 
-    expect(screen.queryByRole('columnheader', { name: 'apikey.list.columns.scopes' })).toBeNull();
-    expect(screen.getByText('My Key').closest('tr')!.textContent).not.toContain(
-      'apikey.scopes.groups.agent',
-    );
+    const scopedRow = screen.getByText('My Key').closest('tr')!;
+    expect(within(scopedRow).getByText('apikey.scopes.count')).toBeInTheDocument();
+    expect(scopedRow.textContent).not.toContain('apikey.scopes.groups.agent');
+
+    // scopes absent = legacy full access, same badge as an explicit `['*']`
+    const fullRow = screen.getByText('Full Key').closest('tr')!;
+    expect(within(fullRow).getByText('apikey.scopes.fullAccess')).toBeInTheDocument();
+  });
+
+  it('deletes a key from the row menu after confirmation', async () => {
+    renderPage();
+    await screen.findByText('My Key');
+
+    const row = screen.getByText('My Key').closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: 'apikey.list.actions.delete' }));
+
+    expect(hoisted.confirmModal).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(hoisted.trpc.deleteApiKey).toHaveBeenCalledWith({ id: 'key-1' }));
+    await waitFor(() => expect(hoisted.trpc.getApiKeys).toHaveBeenCalledTimes(2));
+  });
+
+  it('opens the detail drawer from the row menu', async () => {
+    renderPage();
+    await screen.findByText('My Key');
+
+    const row = screen.getByText('My Key').closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: 'apikey.list.actions.viewDetails' }));
+
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 
   it('opens the detail drawer on row click listing only the granted scopes', async () => {
     hoisted.trpc.getApiKeys.mockResolvedValue([
-      makeItem({ scopes: ['model:read', 'model:invoke', 'agent:read'] }),
+      makeItem({
+        scopes: ['model:read', 'model:invoke', 'agent:read', 'mcp:read', 'mcp:write', 'usage:read'],
+      }),
     ]);
     renderPage();
     await screen.findByText('My Key');
@@ -400,7 +490,9 @@ describe('ApiKey', () => {
     expect(within(dialog).getByText('apikey.detail.title')).toBeInTheDocument();
     // one row per granted domain, actions collapsed — ungranted domains absent
     expect(within(dialog).getByText('apikey.scopes.groups.agent')).toBeInTheDocument();
+    expect(within(dialog).getByText('apikey.scopes.groups.mcp')).toBeInTheDocument();
     expect(within(dialog).getByText('apikey.scopes.groups.model')).toBeInTheDocument();
+    expect(within(dialog).getByText('apikey.scopes.groups.usage')).toBeInTheDocument();
     expect(within(dialog).queryByText('apikey.scopes.groups.chat')).toBeNull();
     expect(within(dialog).queryByText('apikey.scopes.groups.file')).toBeNull();
     // the model row collapses read + invoke onto one line (the `t` mock echoes
@@ -414,8 +506,39 @@ describe('ApiKey', () => {
         'apikey.scopes.invoke',
       ].join(''),
     );
-    // read-only: no editable scope controls in the detail view
+    // the grant summary stays compact until the creator explicitly edits it
     expect(within(dialog).queryAllByRole('checkbox')).toHaveLength(0);
+    expect(
+      within(dialog).getByRole('button', { name: 'apikey.detail.permissions.edit' }),
+    ).toBeEnabled();
+  });
+
+  it('edits a key scope in place and refreshes the list', async () => {
+    hoisted.trpc.getApiKeys.mockResolvedValue([makeItem({ scopes: ['agent:read'] })]);
+    renderPage();
+    await screen.findByText('My Key');
+
+    const dialog = await openDetail('My Key');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'apikey.detail.permissions.edit' }));
+    const toggleScope = async (groupKey: string) => {
+      const group = within(dialog).getByText(`apikey.scopes.groups.${groupKey}`).parentElement!;
+      const checkbox = within(group).getByRole('checkbox', { name: 'apikey.scopes.read' });
+      // base-ui >= 1.8 ignores synthetic Space keyDown/keyUp and a bare click
+      // on the `role=checkbox` span inside a dialog; clicking the wrapping
+      // <label> is what toggles it, and is what a real pointer hits anyway.
+      fireEvent.click(checkbox.closest('label')!);
+    };
+    await toggleScope('agent');
+    await toggleScope('chat');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'apikey.detail.permissions.save' }));
+
+    await waitFor(() =>
+      expect(hoisted.trpc.updateApiKey).toHaveBeenCalledWith({
+        id: 'key-1',
+        value: { scopes: ['chat:read'] },
+      }),
+    );
+    await waitFor(() => expect(hoisted.trpc.getApiKeys).toHaveBeenCalledTimes(2));
   });
 
   it('shows the full-access copy instead of the grant list for a full-access key', async () => {

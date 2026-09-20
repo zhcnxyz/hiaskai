@@ -9,6 +9,17 @@ import { buildAgentInput } from './buildAgentInput';
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x10]);
 
 describe('buildAgentInput', () => {
+  it('puts Kimi Code text in argv and rejects images', async () => {
+    await expect(buildAgentInput('kimi-code', 'hello')).resolves.toEqual({
+      args: ['--prompt', 'hello'],
+      stdin: '',
+    });
+    await expect(
+      buildAgentInput('kimi-code', [
+        { source: { type: 'url', url: 'https://example.com/a.png' }, type: 'image' },
+      ]),
+    ).rejects.toThrow(/Kimi Code does not support image attachments/);
+  });
   let tmp: string;
 
   beforeEach(async () => {
@@ -272,31 +283,10 @@ describe('buildAgentInput', () => {
   });
 
   describe('pi', () => {
-    it('uses raw text stdin and @path image arguments', async () => {
-      const filePath = path.join(tmp, 'pi input.png');
-      await writeFile(filePath, PNG_BYTES);
-      const plan = await buildAgentInput('pi', [
-        { text: 'first', type: 'text' },
-        { source: { path: filePath, type: 'path' }, type: 'image' },
-        { text: 'second', type: 'text' },
-      ]);
-
-      expect(plan).toEqual({ args: [`@${filePath}`], stdin: 'first\n\nsecond' });
-    });
-
-    it('materializes base64 images through the shared path-input helper', async () => {
-      const plan = await buildAgentInput(
-        'pi',
-        [
-          {
-            source: { data: PNG_BYTES.toString('base64'), mediaType: 'image/png', type: 'base64' },
-            type: 'image',
-          },
-        ],
-        { cacheDir: tmp },
+    it('rejects the legacy stdin/args input — pi is RPC-only', async () => {
+      await expect(buildAgentInput('pi', [{ text: 'first', type: 'text' }])).rejects.toThrow(
+        /RPC transport only/,
       );
-      expect(plan.args).toHaveLength(1);
-      expect(plan.args[0]).toMatch(/^@.*\.png$/);
     });
   });
 

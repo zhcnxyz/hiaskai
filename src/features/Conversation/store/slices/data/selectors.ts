@@ -9,6 +9,7 @@ import { topicSelectors } from '@/store/chat/selectors';
 
 import { type State } from '../../initialState';
 import { getPendingInterventions } from './pendingInterventions';
+import { collectSteerChains } from './steerChains';
 import { getWorkSummariesByRootOperationId } from './workSummaries';
 
 const displayMessages = (s: State) => s.displayMessages;
@@ -35,6 +36,25 @@ const getDisplayMessageById = (id: string) => (s: State) => {
 const getDbMessageById = (id: string) => (s: State) => s.dbMessages.find((m) => m.id === id);
 const getDbMessageByToolCallId = (id: string) => (s: State) =>
   s.dbMessages.find((m) => m.tool_call_id === id);
+
+/**
+ * `createdAt` is typed as a number but arrives as a `Date` after a DB rehydrate
+ * (superjson keeps `timestamptz` as `Date`), so normalize before comparing.
+ */
+const toEpochMs = (value: Date | number | string | null | undefined): number | undefined => {
+  if (value === null || value === undefined) return undefined;
+  const time = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return Number.isNaN(time) ? undefined : time;
+};
+
+/**
+ * `createdAt` of a tool call's result row, normalized to epoch ms.
+ *
+ * Resolve the row by its unique message id rather than `tool_call_id`: Codex
+ * reuses item ids such as `item_1` across resumed turns in the same topic.
+ */
+const getToolMessageCreatedAt = (resultMessageId: string | undefined) => (s: State) =>
+  resultMessageId ? toEpochMs(getDbMessageById(resultMessageId)(s)?.createdAt) : undefined;
 
 /**
  * Helper to find last message ID in an AssistantContentBlock
@@ -144,6 +164,38 @@ const workSummariesByRootOperationId = (rootOperationId?: string | null) => (s: 
   getWorkSummariesByRootOperationId(s.dbMessages, rootOperationId);
 
 const isSecondLastMessageFromUser = (s: State) => s.displayMessages.at(-2)?.role === 'user';
+
+const rowMemberIds = (id: string) => (s: State) =>
+  collectSteerChains(s.displayMessages).byHost.get(id)?.memberIds ?? [id];
+
+const hostRowOf = (id: string) => (s: State) =>
+  collectSteerChains(s.displayMessages).hostOf.get(id) ?? id;
+
+const collectDeletableMessageIds = (message: UIChatMessage | undefined): string[] => {
+  if (!message) return [];
+  if ((message.role !== 'assistantGroup' && message.role !== 'supervisor') || !message.children) {
+    return [message.id];
+  }
+
+  return [
+    message.id,
+    ...message.children.map((child) => child.id),
+    ...message.children.flatMap(
+      (child) => child.tools?.flatMap((tool) => (tool.result?.id ? [tool.result.id] : [])) ?? [],
+    ),
+  ];
+};
+
+// The server reparents survivors instead of cascading, so every folded
+// continuation must be expanded the same way as the host or its later blocks
+// resurface as a fresh turn under the original user message.
+const deletableRowMessageIds = (id: string) => (s: State) => [
+  ...new Set(
+    rowMemberIds(id)(s).flatMap((memberId) =>
+      collectDeletableMessageIds(getDisplayMessageById(memberId)(s)),
+    ),
+  ),
+];
 
 const toAssistantContentBlock = (message: UIChatMessage): AssistantContentBlock => ({
   content: message.content,
@@ -255,6 +307,7 @@ const getVerifyOrdinal = (id: string) => (s: State) => {
 export const dataSelectors = {
   currentTopicSummary,
   dbMessages,
+  deletableRowMessageIds,
   getVerifyOrdinal,
   displayMessageIds,
   displayMessages,
@@ -266,11 +319,14 @@ export const dataSelectors = {
   getDisplayMessageById,
   getGroupLatestMessageWithoutTools,
   getToolInBlock,
+  getToolMessageCreatedAt,
   getToolsInBlock,
   hasNoRenderedReply,
+  hostRowOf,
   isSecondLastMessageFromUser,
   messagesInit,
   pendingInterventions,
+  rowMemberIds,
   skipFetch,
   taskCallbackTaskIds,
   workSummariesByRootOperationId,
