@@ -1,4 +1,8 @@
-import { type AgentRuntimeContext, type AgentState } from '@lobechat/agent-runtime';
+import {
+  type AgentRunLlmExecutor,
+  type AgentRuntimeContext,
+  type AgentState,
+} from '@lobechat/agent-runtime';
 import type {
   AgentGroupConfig,
   BotPlatformContext,
@@ -13,6 +17,7 @@ import type {
   ChatTopicBotContext,
   EvalToolForwardingConfig,
   ExpertiseContextSnapshot,
+  FrozenCredentialFacts,
   UserInterventionConfig,
 } from '@lobechat/types';
 import type { SearchDecision } from 'model-bank';
@@ -267,6 +272,12 @@ export interface AgentExecutionResult {
  * `AgentRuntimeService.completeSubAgentBridge`.
  */
 export interface SubAgentBridgeParams {
+  /**
+   * Failure reason known to the caller but absent from the child's stored
+   * state — set when the watchdog abandoned the child, whose coordinator state
+   * was never marked errored.
+   */
+  errorMessage?: string;
   /** Child op's final state — passed in local mode; loaded from the coordinator otherwise. */
   finalState?: AgentState;
   /** Child (sub-agent) operation ID. */
@@ -300,6 +311,8 @@ export interface GroupActionMemberBridgeParams {
    * collapse the anchor onto the group tool call itself).
    */
   anchorMessageId: string;
+  /** Member deadline (epoch ms), carried for approval continuations. */
+  deadlineAt?: number;
   /** Total members forked under this group tool call — the K=N barrier target. */
   expectedMembers: number;
   /** Child member op's final state — passed in local mode; loaded otherwise. */
@@ -374,6 +387,13 @@ export interface ExecGroupMemberParams {
   timeout?: number;
   /** Group topic id. */
   topicId: string;
+  /**
+   * The supervisor run's approval policy. Members answer to the same mode the
+   * user picked for the turn, so a `humanIntervention: 'required'` tool still
+   * asks for approval when a member calls it. Falls back to headless only when
+   * the supervisor carries none.
+   */
+  userInterventionConfig?: UserInterventionConfig;
 }
 
 export interface ExecGroupMemberResult {
@@ -387,6 +407,13 @@ export interface ExecGroupMemberResult {
 }
 
 export interface OperationCreationParams {
+  /**
+   * The client starting this run handles `member_runtime_end` (declared via
+   * `aiAgent.execAgent`'s `streamFeatures`). Persisted on the op's metadata so
+   * the Gateway stream notifier renames the group member terminals it mirrors
+   * onto this op's channel only for a client that recognizes the new event.
+   */
+  acceptsMemberRuntimeEnd?: boolean;
   activeDeviceId?: string;
   /**
    * Principal pool the routed `activeDeviceId` lives in. `personal` when a
@@ -427,6 +454,8 @@ export interface OperationCreationParams {
     clientIp?: string;
     defaultTaskAssigneeAgentId?: string;
     documentId?: string | null;
+    editingAgentId?: string;
+    editingGroupId?: string;
     groupId?: string | null;
     isSubAgent?: boolean;
     /**
@@ -474,6 +503,11 @@ export interface OperationCreationParams {
   botContext?: ChatTopicBotContext;
   /** Bot platform context for injecting platform capabilities (e.g. markdown support) */
   botPlatformContext?: BotPlatformContext;
+  /**
+   * Wire protocol the client that started this run speaks; `2` lets the run
+   * deliver message revisions instead of whole `uiMessages` snapshots. Absent ⇒ 1.
+   */
+  clientProtocol?: 1 | 2;
   /**
    * Borrowed-connector attribution, resolved once during tool discovery. Run
    * context for the context engine to inject — see `expertise`.
@@ -529,10 +563,20 @@ export interface OperationCreationParams {
     sourceOperationId: string;
     sourceToolMessageIds: string[];
   };
+  /**
+   * The client that started this run can execute relayed LLM attempts
+   * (`llm_execute`). Stored on `state.host.llmExecutor`; a sub-agent run
+   * inherits its parent's when it declares none.
+   */
+  llmExecutor?: AgentRunLlmExecutor;
   maxSteps?: number;
   modelRuntimeConfig?: any;
   /** Marks the source claim non-rollbackable once deterministic runtime state is durable. */
   onInterventionPrepared?: () => void;
+  /** Prepare dependent records after persistence and before execution dispatch. */
+  onOperationCreated?: (operationId: string) => Promise<void>;
+  /** Credentials frozen for the run; see {@link FrozenCredentialFacts}. */
+  operationCredentials?: FrozenCredentialFacts;
   operationId: string;
   /** Operation-level skill set for SkillResolver */
   operationSkillSet?: OperationSkillSet;

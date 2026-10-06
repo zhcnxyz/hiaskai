@@ -20,6 +20,7 @@ import type {
   EvalToolForwardingConfig,
   ExecutionPlan,
   ExpertiseContextSnapshot,
+  FrozenCredentialFacts,
   FrozenModelFacts,
   LobeAgentChatConfig,
   LobeAgentConfig,
@@ -28,6 +29,7 @@ import type {
   UserInterventionConfig,
 } from '@lobechat/types';
 
+import type { AgentInstructionRequestHumanApprove } from './instruction';
 import type { Cost, CostLimit, Usage } from './usage';
 
 /**
@@ -83,6 +85,10 @@ export interface AgentRunOrigin {
   /** Default assignee for tasks the run creates. */
   defaultTaskAssigneeAgentId?: string;
   documentId?: string;
+  /** Agent a builder run configures; the run itself is owned by the builtin builder. */
+  editingAgentId?: string;
+  /** Group a group-builder run configures. */
+  editingGroupId?: string;
   groupId?: string;
   // --- Run tree ---
   lineage?: AgentRunLineage;
@@ -132,6 +138,10 @@ export interface AgentRunPrincipal {
   policy?: {
     /** Device-access decision; `reason` names the branch that granted or denied it. */
     deviceAccess?: { canUseDevice: boolean; reason: string };
+    /** Tool-call patterns that always need a human. Unset falls back to the runtime default. */
+    securityBlacklist?: SecurityBlacklistConfig;
+    /** Approval mode for this run — `headless` for background and sub-agent runs. */
+    userIntervention?: UserInterventionConfig;
   };
 }
 
@@ -158,12 +168,44 @@ export interface AgentRunPlan {
  * carried by the runtime without interpretation.
  */
 export interface AgentRunHostEnvelope {
+  /**
+   * Wire protocol the client that started this run asked for. `2` means that
+   * client reconciles its message list from `message_patch` revisions, so the
+   * host may stop pushing whole `uiMessages` snapshots with the step and
+   * terminal events.
+   *
+   * Absent means `1`: an older bundle that only learns the settled list from
+   * what the server pushes, or a client the rollout has not reached.
+   * Deliberately declared by the client rather than derived from a preference
+   * or a transport check — a desktop build months behind the server reads the
+   * same events over the same socket, and guessing on its behalf is how it ends
+   * up rendering a run it cannot reconstruct.
+   */
+  clientProtocol?: 1 | 2;
   /** Serialized lifecycle hook configs (webhook mode), so a queue worker can rebuild the dispatcher. */
   hooks?: SerializedAgentHook[];
   /** Opt into runtime state snapshots on step_complete events. Defaults to false. */
   includeFinalState?: boolean;
+  /**
+   * The client that started this run can execute single LLM attempts the
+   * server relays to it (`llm_execute`), for model providers only the user's
+   * device can reach (a local Ollama, a private-network endpoint). Declared by
+   * the client, like `clientProtocol`; absent means no client will pick up a
+   * relayed call, so such a provider fails fast instead of waiting.
+   */
+  llmExecutor?: AgentRunLlmExecutor;
   /** Queue retry policy for step scheduling. */
   queue?: { retries?: number; retryDelay?: string };
+}
+
+/** A client's declaration that it can run relayed LLM attempts. */
+export interface AgentRunLlmExecutor {
+  /** Relay protocol versions the client speaks, e.g. `llm_relay@1`. */
+  capabilities: string[];
+  /** Stable id of the declaring client (tab / desktop window), preferred as the executor. */
+  clientId: string;
+  /** Provider ids this client confirmed it can reach directly. */
+  providers: string[];
 }
 
 /**
@@ -224,8 +266,12 @@ export interface AgentWorldSnapshot {
    * is kept apart for the rules that must hide those tools from the model.
    */
   disabledPluginIds?: string[];
+  /** Whether the context engine may inject {@link AgentWorldSnapshot.expertise}. */
+  enableExpertise?: boolean;
   /** Evaluation prompt data for eval runs. */
   eval?: EvalContext;
+  /** Expertise snapshot resolved once when this operation started. */
+  expertise?: ExpertiseContextSnapshot;
   /** Multi-agent group roster (or bot-conversation fallback). */
   group?: AgentGroupConfig;
   /** Root instruction files of the bound project. */
@@ -288,10 +334,17 @@ export interface AgentState {
   costLimit?: CostLimit;
   // --- Metadata ---
   createdAt: string;
-  /** Whether ContextEngine may inject the operation expertise snapshot. */
+  /**
+   * Approval request the same LLM turn emitted after a tool that parked the
+   * operation (`waiting_for_async_tool`). The step loop stops at the park, so
+   * the request is held here and issued by the step that resumes the
+   * operation — before the LLM runs again — instead of being dropped.
+   */
+  deferredHumanApproval?: AgentInstructionRequestHumanApprove;
+  /** @deprecated Use `world.enableExpertise`. */
   enableExpertise?: boolean;
   error?: any;
-  /** Immutable expertise snapshot resolved once when this operation starts. */
+  /** @deprecated Use `world.expertise`. */
   expertise?: ExpertiseContextSnapshot;
   /**
    * When true, the agent is in force-finish mode (maxSteps exceeded).
@@ -372,6 +425,13 @@ export interface AgentState {
     };
   };
 
+  /**
+   * Credentials this run listed once when it was created. A step renders
+   * `{{CREDS_LIST}}` from here instead of asking the Market API again; absent
+   * when the run has changed its own credentials since, and the steps after
+   * that read the list live.
+   */
+  operationCredentials?: FrozenCredentialFacts;
   operationId: string;
   /** Operation-level tool set snapshot (immutable after creation) */
   operationToolSet?: OperationToolSet;
@@ -430,12 +490,7 @@ export interface AgentState {
   // --- Principal ---
   /** Under whose authority the run acts and what it may do. Frozen at creation. */
   principal?: AgentRunPrincipal;
-  /**
-   * Security blacklist configuration
-   * These rules will ALWAYS block execution and require human intervention,
-   * regardless of user settings (even in auto-run mode).
-   * If not provided, DEFAULT_SECURITY_BLACKLIST will be used.
-   */
+  /** @deprecated Use `principal.policy.securityBlacklist`. */
   securityBlacklist?: SecurityBlacklistConfig;
   // --- State Machine ---
   status:
@@ -507,10 +562,7 @@ export interface AgentState {
    */
   usage: Usage;
 
-  /**
-   * User's global intervention configuration
-   * Controls how tools requiring approval are handled
-   */
+  /** @deprecated Use `principal.policy.userIntervention`. */
   userInterventionConfig?: UserInterventionConfig;
 
   // --- World snapshot ---

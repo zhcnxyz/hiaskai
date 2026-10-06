@@ -1,4 +1,9 @@
 import type { TaskDetailActivityAuthor, TaskDetailData, TaskDetailSubtask } from '@lobechat/types';
+import {
+  clearTaskReposSelection,
+  readTaskExecutionConfig,
+  toTaskExecutionConfigPatch,
+} from '@lobechat/types';
 import { toast } from '@lobehub/ui/base-ui';
 import isEqual from 'fast-deep-equal';
 import { t } from 'i18next';
@@ -59,6 +64,12 @@ export interface TaskUpdateOptions {
    * not resolve members itself (that source is a business-layer hook).
    */
   optimisticAssignee?: TaskDetailActivityAuthor;
+  /**
+   * Replaces the failure toast's Retry when this update is one step of a larger
+   * action (e.g. assign-then-run), so Retry repeats the whole action instead of
+   * only this write.
+   */
+  retry?: () => void;
   /**
    * The mounted editor marks its own autosaves so they do not request an
    * external-content reload. Tool calls and refetches are authoritative by default.
@@ -476,10 +487,27 @@ export class TaskDetailSliceActionImpl {
       [...(current?.activities ?? []), ...optimisticActivities],
       priorityRow,
     );
+    // Mirror the server's reassign rule (`TaskModel.updateWithLog`) so the
+    // run-location cluster stops showing the previous agent's repos the moment
+    // the assignee flips, instead of one refetch later: `repos` belong to the
+    // assignee's provider env, and the run those repos imply is the sandbox
+    // directory the new agent may not be able to open. Same helper as the
+    // server, so the two cannot drift.
+    const reassignedAgent =
+      assigneeAgentId !== undefined && !!current?.agentId && assigneeAgentId !== current.agentId;
+    const currentExecution = reassignedAgent ? readTaskExecutionConfig(current?.config) : undefined;
+    const clearedExecution = reassignedAgent
+      ? clearTaskReposSelection(currentExecution)
+      : undefined;
+    const clearedConfig =
+      reassignedAgent && clearedExecution !== currentExecution
+        ? { ...current?.config, execution: toTaskExecutionConfigPatch(clearedExecution) }
+        : undefined;
     const optimistic: Partial<TaskDetailData> = {
       ...optimisticRest,
       ...(assigneeAgentId !== undefined ? { agentId: assigneeAgentId } : {}),
       ...(assigneeUserId !== undefined ? { userId: assigneeUserId } : {}),
+      ...(clearedConfig ? { config: clearedConfig } : {}),
       ...(optimisticActivities.length > 0 || priorityRow ? { activities } : {}),
     };
     const payload = options?.actorAgentId ? { ...data, actorAgentId: options.actorAgentId } : data;
@@ -516,11 +544,13 @@ export class TaskDetailSliceActionImpl {
          * content. Treating Retry as another editor echo would update only the
          * Store and server, leaving the mounted editor on the rollback snapshot.
          */
-        const retry = () =>
-          void this.#get().updateTask(id, data, {
-            ...options,
-            source: 'external',
-          });
+        const retry =
+          options?.retry ??
+          (() =>
+            void this.#get().updateTask(id, data, {
+              ...options,
+              source: 'external',
+            }));
         saveToast(error, { retry });
       },
       setStatus: (status) => this.#get().internal_setTaskSaveStatus(id, status),

@@ -159,7 +159,6 @@ export interface GenerateDraftPlanInput {
   enableAiGeneration?: boolean;
   goal: string;
   maxAiCriteria?: number;
-  modelConfig?: { model: string; provider: string };
   operationId: string;
   verifyCriteriaIds?: string[];
   verifyRubricId?: string | null;
@@ -176,6 +175,9 @@ export class VerifyService {
   // ---- subject-level acceptance ----
   getAcceptanceBundle = (id: string): Promise<AcceptanceBundle> =>
     lambdaClient.acceptance.getBundle.query({ id });
+
+  setAcceptanceVisibility = (id: string, visibility: 'private' | 'public') =>
+    lambdaClient.acceptance.setVisibility.mutate({ id, visibility });
 
   /** The acceptance aggregate for a subject (topic/task/document), or null. */
   getAcceptanceBySubject = (subjectType: AcceptanceSubjectType, subjectId: string) =>
@@ -237,8 +239,8 @@ export class VerifyService {
   acceptDelivery = (id: string, comment?: string) =>
     lambdaClient.acceptance.accept.mutate({ comment, id });
 
-  rejectDelivery = (id: string, comment: string) =>
-    lambdaClient.acceptance.reject.mutate({ comment, id });
+  rejectDelivery = (id: string, comment?: string, options?: { dispatch?: boolean }) =>
+    lambdaClient.acceptance.reject.mutate({ comment, dispatch: options?.dispatch, id });
 
   /**
    * The user's verdict on individual union checks — accept settles a check for
@@ -439,7 +441,6 @@ export class VerifyService {
     context?: string;
     goal: string;
     maxCriteria?: number;
-    modelConfig: { model: string; provider: string };
   }): Promise<VerifyCriterionDraft[]> =>
     lambdaClient.verify.generateCriteria.mutate(input) as Promise<VerifyCriterionDraft[]>;
 

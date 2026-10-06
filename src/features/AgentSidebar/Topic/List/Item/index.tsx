@@ -112,6 +112,23 @@ const styles = createStaticStyles(({ css }) => ({
 // fire — each racing to write activeTopicId (see ).
 let pendingSingleClickTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * The mobile surface renders its topic list in a modal and never mounts the
+ * working sidebar — the desktop host of a topic's thread list. Without nesting
+ * the rows under the topic row, mobile users can't reach an existing subtopic
+ * at all, so the nesting lives here on that surface only.
+ *
+ * Scoped to the route's topic (`showThreadList`): opening a thread under an
+ * inactive topic would call `openThreadInPortal` while `activeTopicId` still
+ * points at another topic, so the thread would resolve against the wrong topic's
+ * context — and every mounted list would fetch its own threads.
+ *
+ * Read per call rather than once at module load so a test can stub `__MOBILE__`.
+ */
+const isMobileSurface = () => typeof __MOBILE__ !== 'undefined' && __MOBILE__;
+// Nesting cue: keeps the rows visually under their topic row.
+const NESTED_THREAD_LIST_INDENT = 32;
+
 const cancelPendingSingleClick = () => {
   if (pendingSingleClickTimer) {
     clearTimeout(pendingSingleClickTimer);
@@ -218,6 +235,7 @@ interface TopicItemRowProps extends TopicItemProps {
   defaultTopicActive: boolean;
   isTopicActive: boolean;
   navRef: RefObject<TopicNavigationActions>;
+  /** Route's topic — only its row may carry its thread list (see the mobile mount). */
   showThreadList: boolean;
 }
 
@@ -538,11 +556,20 @@ const TopicItemRow = memo<TopicItemRowProps>(
           extra={
             <>
               <TopicMigrationIndicator agentId={activeAgentId} topicId={id} />
-              <RunningElapsedTime
-                agentId={activeAgentId}
-                runStartedAt={runStartedAt}
-                topicId={id}
-              />
+              {/* Gated on the SAME boolean that draws the running ring: both say
+                  "this row is visibly running", and a row that stopped spinning
+                  must not keep counting. The server `runStartedAt` fallback only
+                  knows the persisted `running` status, which outlives the answer
+                  — it stays set through the post-visible-output tail where the
+                  ring is deliberately masked (#16518) and the terminal
+                  bookkeeping can run for tens of seconds. */}
+              {shouldShowRunningIcon && (
+                <RunningElapsedTime
+                  agentId={activeAgentId}
+                  runStartedAt={runStartedAt}
+                  topicId={id}
+                />
+              )}
             </>
           }
           onClick={handleClick}
@@ -568,7 +595,7 @@ const TopicItemRow = memo<TopicItemRowProps>(
         ) : (
           navItem
         )}
-        {showThreadList && (
+        {isMobileSurface() && showThreadList && id && (
           <Suspense
             fallback={
               <Flexbox gap={8} paddingBlock={8} paddingInline={24} width={'100%'}>
@@ -577,7 +604,9 @@ const TopicItemRow = memo<TopicItemRowProps>(
               </Flexbox>
             }
           >
-            <ThreadList topicId={id} />
+            <Flexbox style={{ paddingInlineStart: NESTED_THREAD_LIST_INDENT }} width={'100%'}>
+              <ThreadList topicId={id} />
+            </Flexbox>
           </Suspense>
         )}
       </Flexbox>

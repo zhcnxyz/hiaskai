@@ -5,7 +5,7 @@ import type {
   ExperienceMemoryItemSchema,
   PreferenceMemoryItemSchema,
   RemoveIdentityActionSchema,
-  UpdateIdentityActionSchema,
+  UpdateIdentityToolInputSchema,
 } from '@lobechat/memory-user-memory/schemas';
 import type { QueryTaxonomyOptionsResult, SearchMemoryResult } from '@lobechat/types';
 import type { z } from 'zod';
@@ -23,6 +23,12 @@ export const MemoryApiName = {
 } as const;
 
 export type MemoryApiNameType = (typeof MemoryApiName)[keyof typeof MemoryApiName];
+
+/** APIs available to an Agent Share visitor when the creator grants read access. */
+export const MEMORY_READ_API_NAMES: ReadonlySet<MemoryApiNameType> = new Set([
+  MemoryApiName.queryTaxonomyOptions,
+  MemoryApiName.searchUserMemory,
+]);
 
 /**
  * APIs that mutate the user's memory store. Single source of truth shared by
@@ -94,7 +100,8 @@ export interface AddPreferenceMemoryState {
 }
 
 // Update Identity
-export type UpdateIdentityMemoryParams = z.infer<typeof UpdateIdentityActionSchema>;
+/** Raw tool arguments: the model may send null for fields it leaves unchanged. */
+export type UpdateIdentityMemoryParams = z.input<typeof UpdateIdentityToolInputSchema>;
 export interface UpdateIdentityMemoryState {
   identityId?: string;
 }

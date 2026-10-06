@@ -12,6 +12,7 @@ import type {
   VerifyAgentPlanConfig,
   VerifyCheckDecisionDetail,
   VerifyCheckItem,
+  VerifyCheckTally,
   VerifyRunDecisionDetail,
   VerifySurface,
 } from '@lobechat/types';
@@ -35,7 +36,6 @@ import type {
   VerifyRunItem,
 } from '@/database/schemas/verify';
 import type { LobeChatDatabase } from '@/database/type';
-import { TaskService } from '@/server/services/task';
 import { ExpertiseRejectionWorkflow } from '@/server/workflows/expertiseRejection';
 
 import { type AcceptanceMergeSummary, mergeAcceptanceRounds } from './acceptanceMerge';
@@ -278,6 +278,30 @@ export const buildAcceptanceCheckUnion = (
     }
   }
   return [...grouped.values(), ...[...rows.values()].filter((row) => !grouped.has(row.id))];
+};
+
+/**
+ * The union's own three-way split, counted — the number a summary can show
+ * without opening the list.
+ *
+ * It counts UNION ROWS, not one round's result rows. A repair round re-runs the
+ * check it was asked to fix and carries the rest forward, so the current round's
+ * rows are a subset of the union: counting them would print "1 passed" beside a
+ * list that expands to the repaired check plus everything it carried, and the
+ * two readings of one acceptance would contradict each other.
+ */
+export const tallyCheckUnion = (checks: AcceptanceCheckRow[]): VerifyCheckTally => {
+  let failed = 0;
+  let passed = 0;
+  let unjudged = 0;
+  for (const check of checks) {
+    if (check.state === 'passed') passed++;
+    else if (check.state === 'failed') failed++;
+    // `uncertain` and `not_executed` are both "planned, never judged" — the same
+    // split the acceptance's criteria list draws.
+    else unjudged++;
+  }
+  return { failed, passed, total: checks.length, unjudged };
 };
 
 // ============================================
@@ -541,6 +565,41 @@ export class AcceptanceService {
     });
   };
 
+  /**
+   * The ingest entry point (`lh acceptance run ingest`). An agent authoring its
+   * own report inside a Task run only knows its topic, so a topic subject that
+   * is a Task's run topic is folded onto that Task — otherwise the delivery
+   * lands on a topic aggregate no task surface reads, and the Task page shows
+   * no acceptance at all. A topic that already owns an acceptance keeps it, so
+   * its earlier rounds are not split across two aggregates; recurring
+   * (automation) tasks stay on their per-tick topic.
+   */
+  ensureForIngest = async (
+    subjectType: AcceptanceSubjectType,
+    subjectId: string,
+    defaults?: { requirement?: string; title?: string },
+  ): Promise<AcceptanceItem> => {
+    const taskId =
+      subjectType === 'topic' ? await this.resolveRunTopicTaskId(subjectId) : undefined;
+    if (taskId) return this.ensureForSubject('task', taskId, defaults);
+    return this.ensureForSubject(subjectType, subjectId, defaults);
+  };
+
+  private resolveRunTopicTaskId = async (topicId: string): Promise<string | undefined> => {
+    const taskTopic = await new TaskTopicModel(
+      this.db,
+      this.userId,
+      this.workspaceId,
+    ).findByTopicId(topicId);
+    if (!taskTopic) return;
+    if (await this.acceptanceModel.findBySubject('topic', topicId)) return;
+    const task = await new TaskModel(this.db, this.userId, this.workspaceId).findById(
+      taskTopic.taskId,
+    );
+    if (!task || task.automationMode) return;
+    return task.id;
+  };
+
   private resolveSubjectProjectId = async (
     subjectType: AcceptanceSubjectType,
     subjectId: string,
@@ -694,7 +753,14 @@ export class AcceptanceService {
     // Only the newest round counts — `listByAcceptance` is ascending, and an
     // older draft the chain has moved past is an abandoned ledger position.
     const latest = (await this.runModel.listByAcceptance(acceptanceId)).at(-1);
-    const draft = latest && isDraftVerifyRun(latest) ? latest : undefined;
+    // A run that already executed cannot fold (`foldIntoRound` refuses any source
+    // with results): its verdicts belong to its own round. It is appended after
+    // the draft instead — the path a verification driven by the CLI takes, since
+    // it writes its results before the Task drive binds the round.
+    const draft =
+      latest && isDraftVerifyRun(latest) && (await this.resultModel.listByRun(runId)).length === 0
+        ? latest
+        : undefined;
     if (draft) {
       const folded = await this.runModel.foldIntoRound(runId, draft.id);
       await this.recomputeStatus(acceptanceId);
@@ -879,17 +945,62 @@ export class AcceptanceService {
   };
 
   /**
-   * The user rejects the delivery. The comment is the re-tasking input: it is
+   * A merged pull request accepts the delivery it was linked to. Merging is
+   * the strongest signal a user can give, so unlike {@link accept} this does
+   * not wait for the round to settle: any non-accepted status becomes
+   * `accepted`, a round still in flight is stamped as decided by the merge,
+   * and an acceptance that never had a round is simply closed as accepted.
+   * The decision detail records the merge so the acceptance board and the
+   * verifier-training pipeline can tell it apart from a human verdict.
+   *
+   * Idempotent: an already-accepted acceptance is returned unchanged.
+   */
+  acceptFromScmMerge = async (
+    acceptanceId: string,
+    changeRequest: NonNullable<VerifyRunDecisionDetail['changeRequest']>,
+  ): Promise<AcceptanceItem | null> => {
+    const acceptance = await this.acceptanceModel.findById(acceptanceId);
+    if (!acceptance) return null;
+    if (acceptance.status === 'accepted') return acceptance;
+
+    const runs = await this.runModel.listByAcceptance(acceptanceId);
+    const current = runs.at(-1);
+    if (current) {
+      const detail: VerifyRunDecisionDetail = {
+        changeRequest,
+        decidedAt: new Date().toISOString(),
+        decidedBy: this.actorUserId,
+        source: 'scm_merge',
+      };
+      await this.runModel.setDecision(current.id, 'accept', detail);
+    }
+
+    await this.acceptanceModel.updateStatus(acceptanceId, 'accepted');
+    if (current) this.distilSettledRound(acceptanceId, current.id);
+    if (acceptance.subjectType === 'task') await this.completeTaskSubject(acceptance.subjectId);
+
+    log(
+      'acceptance %s accepted by merge of %s#%d (was %s)',
+      acceptanceId,
+      changeRequest.repoFullName,
+      changeRequest.number,
+      acceptance.status,
+    );
+    return (await this.acceptanceModel.findById(acceptanceId))!;
+  };
+
+  /**
+   * The user rejects the delivery. An optional comment is a re-tasking input: it is
    * recorded on the round's decision detail, where the next repair/verify round
-   * picks it up. (Spawning the repair run itself is the runtime's job — for
-   * agent-bound rounds via the repair pipeline, for ingested rounds via the
-   * next `lh verify ingest-report`.)
+   * picks it up. (Spawning the repair run is the caller's job — the
+   * `acceptance.reject` procedure sends it back to the origin agent when the
+   * rounds name one; see `dispatchAcceptanceRepair`.)
    *
    * A Goal Task is no exception: its next attempt is started by the Goal
    * coordinator on the following tick, which reads the rejected round's
    * decision detail through the prompt builder.
    */
-  reject = async (acceptanceId: string, comment: string): Promise<AcceptanceItem> => {
+  reject = async (acceptanceId: string, comment?: string): Promise<AcceptanceItem> => {
     await this.requireDecidableAcceptance(acceptanceId);
 
     const settled = await this.stampDecision(acceptanceId, 'reject', comment);
@@ -1085,7 +1196,10 @@ export class AcceptanceService {
       if (!task || ['canceled', 'completed', 'failed'].includes(task.status)) return;
 
       // TaskService cascades checkpoint / sibling rollup / downstream unlock —
-      // the same completion path settle.ts drives on a passed verify.
+      // the same completion path settle.ts drives on a passed verify. Loaded
+      // lazily because `TaskService` reaches this module through its acceptance
+      // resolution, so a static import would close a module cycle.
+      const { TaskService } = await import('../task');
       await new TaskService(this.db, this.userId, this.workspaceId).updateStatus({
         id: task.id,
         status: 'completed',
@@ -1362,22 +1476,43 @@ export class AcceptanceService {
     const origin = [...runs].reverse().find((run) => run.metadata?.origin)?.metadata?.origin;
     if (!origin?.agentId && !origin?.topicId) return null;
 
-    const [agent, topic] = await Promise.all([
-      origin.agentId
+    const topicRowPromise = origin.topicId
+      ? new TopicModel(this.db, this.userId, this.workspaceId)
+          .findById(origin.topicId)
+          .catch(() => null)
+      : Promise.resolve(null);
+    // Dispatched runs (task / goal / device) record only the topic — the
+    // connector strips the ambient agent id — so the topic's own agent stands in.
+    // A recorded agent does not wait on the topic read.
+    const agentPromise = (
+      origin.agentId ? Promise.resolve(origin.agentId) : topicRowPromise.then((row) => row?.agentId)
+    ).then((agentId) =>
+      agentId
         ? new AgentModel(this.db, this.userId, this.workspaceId)
-            .getAgentAvatarsByIds([origin.agentId])
+            .getAgentAvatarsByIds([agentId])
             .then((rows) => rows[0] ?? null)
             .catch(() => null)
         : null,
-      origin.topicId
-        ? new TopicModel(this.db, this.userId, this.workspaceId)
-            .findById(origin.topicId)
-            .then((row) => (row ? { id: row.id, title: row.title ?? null } : null))
-            .catch(() => null)
-        : null,
-    ]);
+    );
+    const [topicRow, agent] = await Promise.all([topicRowPromise, agentPromise]);
+    const topic = topicRow ? { id: topicRow.id, title: topicRow.title ?? null } : null;
     if (!agent && !topic) return null;
     return { agent, topic };
+  };
+
+  /**
+   * The raw authoring conversation behind the latest round that recorded one —
+   * the ids a rejected delivery is sent back to. Unlike {@link resolveOrigin}
+   * nothing is hydrated: the dispatcher re-reads the topic under the caller's
+   * own scope.
+   */
+  findRepairOrigin = async (
+    acceptanceId: string,
+  ): Promise<{ agentId?: string; topicId?: string } | null> => {
+    const runs = await this.runModel.listByAcceptance(acceptanceId);
+    const origin = [...runs].reverse().find((run) => run.metadata?.origin)?.metadata?.origin;
+    if (!origin?.topicId) return null;
+    return { agentId: origin.agentId || undefined, topicId: origin.topicId };
   };
 
   /** The rounds + their per-round data the bundle and the union both read. */
@@ -1390,5 +1525,51 @@ export class AcceptanceService {
       this.reportModel.findByRuns(runIds),
     ]);
     return { evidence, reports, results, runs };
+  };
+
+  /**
+   * The union tally of several acceptances at once, counted from the SAME check
+   * union each acceptance page renders (`tallyCheckUnion` over
+   * `buildAcceptanceCheckUnion`), so a summary row and the list it expands to
+   * can never disagree about what a round chain judged.
+   *
+   * Batched on purpose: a surface that summarises many acceptances runs on a
+   * poll, so this is two statements regardless of how many it covers. An
+   * acceptance with no round at all is ABSENT from the map — a caller must not
+   * read "absent" as "nothing passed".
+   */
+  getCheckTalliesByAcceptances = async (
+    acceptanceIds: string[],
+  ): Promise<Map<string, VerifyCheckTally>> => {
+    const ids = [...new Set(acceptanceIds.filter(Boolean))];
+    const tallies = new Map<string, VerifyCheckTally>();
+    if (ids.length === 0) return tallies;
+
+    const runs = await this.runModel.listByAcceptances(ids);
+    const results = await this.resultModel.listByRuns(runs.map((run) => run.id));
+
+    const resultsByRun = new Map<string, VerifyCheckResultItem[]>();
+    for (const result of results) {
+      if (!result.verifyRunId) continue;
+      const bucket = resultsByRun.get(result.verifyRunId) ?? [];
+      bucket.push(result);
+      resultsByRun.set(result.verifyRunId, bucket);
+    }
+
+    const runsByAcceptance = new Map<string, VerifyRunItem[]>();
+    for (const run of runs) {
+      if (!run.acceptanceId) continue;
+      const bucket = runsByAcceptance.get(run.acceptanceId) ?? [];
+      bucket.push(run);
+      runsByAcceptance.set(run.acceptanceId, bucket);
+    }
+
+    for (const [acceptanceId, acceptanceRuns] of runsByAcceptance) {
+      const checks = buildAcceptanceCheckUnion(
+        acceptanceRuns.map((run) => ({ results: resultsByRun.get(run.id) ?? [], run })),
+      );
+      tallies.set(acceptanceId, tallyCheckUnion(checks));
+    }
+    return tallies;
   };
 }

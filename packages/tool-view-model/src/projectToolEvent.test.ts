@@ -78,6 +78,30 @@ describe('projectToolEndResult', () => {
   it.each([
     ['lobe-agent-documents', 'listDocuments', { documents: [{ id: 'a' }] }, { documentCount: 1 }],
     ['lobe-user-memory', 'searchUserMemory', { identities: [{ id: 'a' }] }, { resultCount: 1 }],
+    [
+      'lobe-local-system',
+      'grepContent',
+      { matches: ['/a.ts'], pattern: 'x', totalMatches: 1 },
+      { pattern: 'x', totalMatches: 1 },
+    ],
+    [
+      'lobe-cloud-sandbox',
+      'grepContent',
+      { matches: ['/a.ts'], pattern: 'x', totalMatches: 1 },
+      { pattern: 'x', totalMatches: 1 },
+    ],
+    [
+      'lobe-web-browsing',
+      'search',
+      { query: 'x', results: [{ url: 'https://a' }] },
+      { query: 'x', resultCount: 1 },
+    ],
+    [
+      'lobe-knowledge-base',
+      'searchKnowledgeBase',
+      { chunks: [], fileResults: [{ id: 'f1' }] },
+      { resultCount: 1 },
+    ],
   ])('drops the body of %s/%s and projects its state', (identifier, apiName, state, expected) => {
     const projected = projectToolEndResult(
       toolEndData({ content: 'RAW BODY', state, success: true }, identifier, apiName),
