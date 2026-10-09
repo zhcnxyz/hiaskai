@@ -1,10 +1,11 @@
 import {
+  canApplyAsReviewDiff,
   describeLiteXMLEditStep,
   findLiteXMLEditStepProblem,
+  findMalformedLiteXML,
   indexLiteXMLDocument,
   normalizeLiteXMLFragment,
   planLiteXMLEditSteps,
-  touchesList,
 } from '@lobechat/editor-runtime';
 import type { HeadlessEditorOptions, HeadlessLiteXMLOperation } from '@lobehub/editor/headless';
 import { createHeadlessEditor, DEFAULT_HEADLESS_EDITOR_PLUGINS } from '@lobehub/editor/headless';
@@ -215,6 +216,18 @@ export const createMarkdownEditorSnapshot = async (
 
 const LITEXML_DOCUMENT_PATTERN = /^\s*(?:<\?xml[\s?]|<root[\s>])/;
 
+const isJsonValueDocument = (content: string): boolean => {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return false;
+
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Markdown snapshot for content written by an agent. Rejects input that would
  * silently become an empty document — most often LiteXML sent to a Markdown
@@ -226,6 +239,15 @@ export const createAgentMarkdownSnapshot = async (
   if (LITEXML_DOCUMENT_PATTERN.test(content)) {
     throw new Error(
       'Document content looks like LiteXML, but this API expects Markdown. Send Markdown, or use modifyNodes to edit nodes by id.',
+    );
+  }
+
+  // Markdown consumes backslash escapes (`\"` → `"`) and reads `__…__` / `*…*`
+  // as formatting, so a raw JSON body is silently rewritten into text that no
+  // longer parses. Fenced code is stored verbatim.
+  if (isJsonValueDocument(content)) {
+    throw new Error(
+      'Document content is raw JSON, but this API stores Markdown: Markdown parsing would drop backslash escapes and turn `__` or `*` into formatting, so the stored JSON would no longer parse. Nothing was saved. Wrap the JSON in a fenced code block (```json … ```); code blocks are stored exactly as written.',
     );
   }
 
@@ -286,11 +308,18 @@ export const applyLiteXMLOperations = async ({
         const label = describeLiteXMLEditStep(step, operations.length);
         const document = indexLiteXMLDocument(current.litexml ?? '');
 
+        const malformed = 'litexml' in operation && findMalformedLiteXML(operation.litexml);
+        if (malformed) {
+          throw new Error(
+            `${label} failed: ${malformed}. No operations were saved; fix the litexml and retry the whole batch.`,
+          );
+        }
+
         const problem = findLiteXMLEditStepProblem(operation, document);
         if (problem) throw new Error(`${label} failed: ${problem}. ${NOTHING_SAVED_HINT}`);
 
         await editor.applyLiteXML(
-          toHeadlessLiteXMLOperation(operation, !touchesList(operation, document)),
+          toHeadlessLiteXMLOperation(operation, canApplyAsReviewDiff(operation, document)),
         );
         const next = exportSnapshot(editor, true);
 
